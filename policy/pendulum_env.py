@@ -29,4 +29,3 @@ class PendulumParams:
     pendulum_friction: float        # fricción viscosa; N·m·s
     pendulum_coulomb: float         # torque de fricción de Coulomb (seca); N·m
 
-hola a todos soy maximiliano de jusus galindo hernandez y estoy construyendo un robot porque soy como spider man, dr doom y iron man jajaj somos millonarios jeje xd
