@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Datos crudos de grabaciones (regenerables; los JSON de mediciones/ sí se versionan)
+datos/
+
+# macOS
+.DS_Store
+
+# Entrenamiento (checkpoints y logs, cuando exista rl/)
+runs/
+*.zip
+*.pt
+
+# MuJoCo
+MUJOCO_LOG.TXT
