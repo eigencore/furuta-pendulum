@@ -23,7 +23,8 @@ def test_accion_cero_no_mueve_el_brazo() -> None:
 
 
 def test_velocidad_ordenada_llega_a_3_5_en_dos_pasos_y_no_pasa() -> None:
-    env = RotaryInvertedPendulumEnv()
+    # Sin suavizado (ventana 1) para probar solo la ley P y el tope de aceleración.
+    env = RotaryInvertedPendulumEnv(action_smooth_window=1)
     env.reset(seed=0)
     _, _, _, _, i1 = env.step(np.array([1.0]))
     _, _, _, _, i2 = env.step(np.array([1.0]))
