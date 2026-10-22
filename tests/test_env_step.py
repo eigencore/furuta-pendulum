@@ -81,9 +81,9 @@ def test_observacion_valida_tras_step() -> None:
     env = RotaryInvertedPendulumEnv()
     env.reset(seed=0)
     obs, reward, term, trunc, info = env.step(np.array([0.3]))
-    assert obs.shape == (6,) and obs.dtype == np.float32
+    assert obs.shape == (24,) and obs.dtype == np.float32
     assert env.observation_space.contains(obs)
-    assert abs(obs[5] - 0.3) < 1e-6                    # acción previa
+    assert abs(obs[-1] - 0.3) < 1e-6                   # acción previa del frame más nuevo
     assert reward < 0.0                                # colgado: lejos de la meta
 
 

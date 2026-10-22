@@ -29,11 +29,12 @@ def test_estado_inicial_tras_reset() -> None:
 def test_observacion_colgando() -> None:
     env = RotaryInvertedPendulumEnv()
     obs, info = env.reset(seed=0)
-    assert obs.shape == (6,) and obs.dtype == np.float32
+    assert obs.shape == (24,) and obs.dtype == np.float32
     assert env.observation_space.contains(obs)
-    assert obs[2] < -0.99                    # cos θ ≈ -1 (colgando)
-    assert abs(obs[1]) < 0.06                # sin θ ≈ 0
-    assert obs[3] == 0.0 and obs[4] == 0.0 and obs[5] == 0.0
+    frame = obs[-6:]                         # frame más nuevo
+    assert frame[2] < -0.99                  # cos θ ≈ -1 (colgando)
+    assert abs(frame[1]) < 0.06              # sin θ ≈ 0
+    assert frame[3] == 0.0 and frame[4] == 0.0 and frame[5] == 0.0
     assert info == {}
 
 

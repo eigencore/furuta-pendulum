@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -301,6 +302,13 @@ def _wrap_pi(angle: float) -> float:
 #   [motor_pos, sin θ, cos θ, vel_motor, vel_péndulo, acción_previa]
 OBS_FRAME_DIM = 6
 
+# Cuántos frames consecutivos se apilan en la observación (del más viejo al
+# más nuevo). Con 4 frames a 50 Hz la política ve 80 ms de historia: puede
+# inferir aceleraciones y el efecto de sus propias acciones previas. Debe
+# coincidir con OBS_FRAMES del firmware (RLControl.ino); si no, la política
+# desplegada recibiría una observación distinta de la que entrenó.
+OBS_HISTORY_LEN = 4
+
 
 class RotaryInvertedPendulumEnv(gym.Env):
     """Simulación MuJoCo del péndulo invertido rotatorio (versión mínima).
@@ -309,9 +317,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
     MuJoCo el ángulo de la articulación `phi` es 0 con el péndulo colgando,
     así que θ = phi − π (se convierte al construir la observación).
 
-    Bloques 1-5: construcción, reset(), observación, step() y recompensa.
-    Aún falta el render, la aleatorización de dominio, el apilado de frames
-    y el modelo del firmware.
+    Bloques 1-6: construcción, reset(), observación apilada, step() y
+    recompensa. Aún falta el render, la aleatorización de dominio, el
+    suavizado de acción y el modelo del firmware.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": CONTROL_FREQ_HZ}
@@ -324,6 +332,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         max_velocity_rad_s: float = MAX_VELOCITY_RAD_S,
         max_accel_rad_s2: float = MAX_ACCEL_RAD_S2,
         episode_length_s: float = 8.0,
+        obs_history_len: int = OBS_HISTORY_LEN,
         reward_weights: RewardWeights | None = None,
         hard_stop_penalty: float = HARD_STOP_PENALTY,
     ) -> None:
@@ -333,6 +342,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self.max_velocity_rad_s = max_velocity_rad_s
         self.max_accel_rad_s2 = max_accel_rad_s2
         self.episode_length_s = episode_length_s
+        if obs_history_len < 1:
+            raise ValueError(f"obs_history_len debe ser >= 1, recibí {obs_history_len}")
+        self.obs_history_len = obs_history_len
         self.reward_weights = reward_weights or RewardWeights()
         self.hard_stop_penalty = hard_stop_penalty
 
@@ -360,14 +372,20 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # Acción: un número en [-1, 1] que luego se escala a ±max_velocity.
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
 
-        # Observación: un frame de OBS_FRAME_DIM valores. Las cotas son
-        # holgadas; solo documentan la escala esperada de cada canal.
+        # Observación: obs_history_len frames de OBS_FRAME_DIM valores, uno
+        # tras otro. Las cotas son holgadas; solo documentan la escala de
+        # cada canal (np.tile repite las de un frame para cada copia).
         frame_high = np.array(
             [MOTOR_LIMIT_RAD, 1.0, 1.0, 200.0, 200.0, 1.0], dtype=np.float32
         )
+        obs_high = np.tile(frame_high, obs_history_len)
         self.observation_space = spaces.Box(
-            low=-frame_high, high=frame_high, dtype=np.float32
+            low=-obs_high, high=obs_high, dtype=np.float32
         )
+
+        # Historial de frames, del más viejo al más nuevo. Solo lo modifican
+        # reset() y step() (a través de _obs), una vez por paso de control.
+        self._obs_history: deque[np.ndarray] = deque(maxlen=obs_history_len)
 
         self._prev_action = 0.0
 
@@ -405,6 +423,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
 
         self._step_count = 0
         self._prev_action = 0.0
+        self._obs_history.clear()      # _obs() lo rellena con el frame inicial
 
         # Recalcula las cantidades derivadas con el nuevo estado (sin avanzar
         # el tiempo).
@@ -412,6 +431,20 @@ class RotaryInvertedPendulumEnv(gym.Env):
         return self._obs(), {}
 
     def _obs(self) -> np.ndarray:
+        """Observación apilada: los últimos `obs_history_len` frames, del más viejo al nuevo.
+
+        Llamar EXACTAMENTE una vez por reset() y una por step(): cada llamada
+        añade un frame al historial. Tras reset() el historial está vacío y se
+        rellena con el frame inicial repetido, así no hay ceros falsos.
+        """
+        frame = self._frame()
+        if not self._obs_history:
+            self._obs_history.extend([frame] * self.obs_history_len)
+        else:
+            self._obs_history.append(frame)
+        return np.concatenate(self._obs_history)
+
+    def _frame(self) -> np.ndarray:
         """Un frame: [motor_pos, sin θ, cos θ, vel_motor, vel_péndulo, acción_previa].
 
         θ = 0 es péndulo arriba; el ángulo de la articulación `phi` es 0
