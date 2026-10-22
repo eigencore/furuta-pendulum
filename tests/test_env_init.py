@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from furuta.sim.pendulum_env import OBS_FRAME_DIM, RotaryInvertedPendulumEnv
+from furuta.sim.pendulum_env import (
+    OBS_FRAME_DIM,
+    OBS_HISTORY_LEN,
+    RotaryInvertedPendulumEnv,
+)
 
 
 def test_pasos_de_fisica_y_de_episodio() -> None:
@@ -15,7 +19,7 @@ def test_pasos_de_fisica_y_de_episodio() -> None:
 
 def test_espacios() -> None:
     env = RotaryInvertedPendulumEnv()
-    assert env.observation_space.shape == (OBS_FRAME_DIM,) == (6,)
+    assert env.observation_space.shape == (OBS_FRAME_DIM * OBS_HISTORY_LEN,) == (24,)
     assert env.action_space.shape == (1,)
     assert env.action_space.low[0] == -1.0 and env.action_space.high[0] == 1.0
 
