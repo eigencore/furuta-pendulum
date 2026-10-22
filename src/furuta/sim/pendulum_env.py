@@ -309,6 +309,14 @@ OBS_FRAME_DIM = 6
 # desplegada recibiría una observación distinta de la que entrenó.
 OBS_HISTORY_LEN = 4
 
+# Suavizado de acción: al motor llega el PROMEDIO de las últimas N acciones
+# de la política (N=1 lo desactiva). Con N=4 a 50 Hz el promedio anula las
+# oscilaciones de 25 y 12.5 Hz (el "PWM" que aprenden las redes), deja pasar
+# casi intacto el control lento (ganancia 0.96 a 2 Hz) y añade un retardo de
+# (N-1)/2 = 1.5 pasos (30 ms). Debe coincidir con ACTION_SMOOTH_WINDOW del
+# firmware (RLControl.ino).
+ACTION_SMOOTH_WINDOW = 4
+
 
 class RotaryInvertedPendulumEnv(gym.Env):
     """Simulación MuJoCo del péndulo invertido rotatorio (versión mínima).
@@ -317,9 +325,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
     MuJoCo el ángulo de la articulación `phi` es 0 con el péndulo colgando,
     así que θ = phi − π (se convierte al construir la observación).
 
-    Bloques 1-6: construcción, reset(), observación apilada, step() y
-    recompensa. Aún falta el render, la aleatorización de dominio, el
-    suavizado de acción y el modelo del firmware.
+    Bloques 1-7: construcción, reset(), observación apilada, step(),
+    recompensa y suavizado de acción. Aún falta el render, la
+    aleatorización de dominio y el modelo del firmware.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": CONTROL_FREQ_HZ}
@@ -333,6 +341,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         max_accel_rad_s2: float = MAX_ACCEL_RAD_S2,
         episode_length_s: float = 8.0,
         obs_history_len: int = OBS_HISTORY_LEN,
+        action_smooth_window: int = ACTION_SMOOTH_WINDOW,
         reward_weights: RewardWeights | None = None,
         hard_stop_penalty: float = HARD_STOP_PENALTY,
     ) -> None:
@@ -345,6 +354,11 @@ class RotaryInvertedPendulumEnv(gym.Env):
         if obs_history_len < 1:
             raise ValueError(f"obs_history_len debe ser >= 1, recibí {obs_history_len}")
         self.obs_history_len = obs_history_len
+        if action_smooth_window < 1:
+            raise ValueError(
+                f"action_smooth_window debe ser >= 1, recibí {action_smooth_window}"
+            )
+        self.action_smooth_window = action_smooth_window
         self.reward_weights = reward_weights or RewardWeights()
         self.hard_stop_penalty = hard_stop_penalty
 
@@ -389,6 +403,12 @@ class RotaryInvertedPendulumEnv(gym.Env):
 
         self._prev_action = 0.0
 
+        # Últimas acciones CRUDAS de la política (arranca en ceros). Su
+        # promedio es la acción que ve el motor.
+        self._action_buf: deque[float] = deque(
+            [0.0] * action_smooth_window, maxlen=action_smooth_window
+        )
+
         # Estado de la cadena aceleración → velocidad → posición (ver step()).
         self._motor_vel = 0.0       # velocidad ORDENADA al motor (rad/s), no la medida
         self._motor_target = 0.0    # posición objetivo integrada (rad)
@@ -423,6 +443,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
 
         self._step_count = 0
         self._prev_action = 0.0
+        self._action_buf.extend([0.0] * self.action_smooth_window)  # maxlen descarta lo viejo
         self._obs_history.clear()      # _obs() lo rellena con el frame inicial
 
         # Recalcula las cantidades derivadas con el nuevo estado (sin avanzar
@@ -469,7 +490,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         """Avanza un paso de control (20 ms a 50 Hz).
 
         Cadena (modo velocidad):
-            acción ∈ [-1, 1] → v_des = acción·3.5 rad/s
+            acción ∈ [-1, 1] → promedio de las últimas N → v_des = promedio·3.5 rad/s
             → ley P saturada: accel = (v_des − v_ordenada)·f_control, tope ±150 rad/s²
             → v_ordenada += accel·dt (tope ±3.5 rad/s)
             → objetivo += v_ordenada·dt (tope ±125°)
@@ -479,12 +500,18 @@ class RotaryInvertedPendulumEnv(gym.Env):
         `hard_stop_penalty` y el episodio termina.
         """
         a = float(np.clip(np.asarray(action).flatten()[0], -1.0, 1.0))
+
+        # Suavizado: la acción CRUDA `a` va a la recompensa y a prev_action
+        # (la política ve lo que ella decidió); solo el motor recibe el
+        # promedio de las últimas N acciones.
+        self._action_buf.append(a)
+        smoothed = sum(self._action_buf) / self.action_smooth_window
         dt = self._dt_control
 
         # --- Ley P: velocidad deseada → aceleración ordenada ---
         # Realimenta la velocidad ORDENADA, no la medida (ver explicación):
         # el stepper ejecuta casi perfecto, y la medida añadiría temblor.
-        v_des = a * self.max_velocity_rad_s
+        v_des = smoothed * self.max_velocity_rad_s
         accel_cmd = (v_des - self._motor_vel) * self.control_freq_hz
         accel_cmd = float(np.clip(accel_cmd, -self.max_accel_rad_s2, self.max_accel_rad_s2))
 
@@ -539,5 +566,6 @@ class RotaryInvertedPendulumEnv(gym.Env):
             "phi": phi,
             "motor_target": self._motor_target,
             "motor_vel_cmd": self._motor_vel,
+            "smoothed_action": smoothed,
         }
         return self._obs(), reward, terminated, truncated, info
