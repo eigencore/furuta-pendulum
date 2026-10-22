@@ -49,8 +49,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 # que describe, en lugar de un genérico `sysid_params.json`, para que en una
 # configuración con varios robots no se entrene en silencio con el robot que
 # se haya medido último. Para cualquier otro robot, pasa `--params-path`.
-# "reference" = fricción medida en el robot del autor original: sirve de
-# valor de arranque hasta que midas la de tu propio robot con sysid_wizard.
 DEFAULT_PARAMS_PATH = REPO_ROOT / "mediciones" / "sysid_params_reference.json"
 
 # --- Límites del motor -----------------------------------------------------
