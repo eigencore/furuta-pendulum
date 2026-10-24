@@ -13,7 +13,7 @@ from stable_baselines3.common.monitor import Monitor
 
 from furuta.train.evaluate import evaluate_model, make_deploy_env_fn
 from furuta.train.make_env import make_eval_env_fn, make_train_env_fn
-from furuta.train.sac_sb3 import TrainConfig, default_gamma, train
+from furuta.train.sac_sb3 import TrainConfig, default_gamma, eval_transport, train
 
 
 class _PoliticaCero:
@@ -104,6 +104,21 @@ def test_gamma_conserva_el_horizonte_en_segundos() -> None:
     assert math.isclose(1 / (1 - 0.99) / 35.0, 1 / (1 - g50) / 50.0, rel_tol=0.01)
 
 
+def test_la_evaluacion_se_fija_en_el_punto_medio_del_transporte() -> None:
+    base = Path("runs/x")
+    assert eval_transport(TrainConfig(run_dir=base)) == (0, 0.0)             # etapa 1: sin DR
+    etapa2 = TrainConfig(run_dir=base, domain_randomization=True,
+                         dr_delay_steps_range=(0, 1), dr_lag_tau_range_s=(0.0, 0.020))
+    assert eval_transport(etapa2) == (0, 0.010)
+    etapa3 = TrainConfig(run_dir=base, domain_randomization=True,
+                         dr_delay_steps_range=(1, 1), dr_lag_tau_range_s=(0.0, 0.015))
+    assert eval_transport(etapa3) == (1, 0.0075)
+    # El entorno de evaluación recibe ese transporte, sigue sin DR y sin sesgo.
+    base_env = make_eval_env_fn(action_delay_steps=1, action_lag_tau_s=0.0075)().unwrapped
+    assert (base_env._action_delay_steps, base_env._action_lag_tau_s) == (1, 0.0075)
+    assert base_env.domain_randomization is False and base_env._dr_theta_bias_max_rad == 0.0
+
+
 def test_evaluar_la_politica_cero() -> None:
     res = evaluate_model(_PoliticaCero(), n_episodes=3, seed=0)
     assert res["episodios"] == 3
@@ -143,6 +158,7 @@ def test_corrida_minima_y_reanudacion() -> None:
         assert final2.exists()
         cfg2 = json.loads((run2 / "config.json").read_text())
         assert cfg2["domain_randomization"] is True and cfg2["resume"] == str(final)
+        assert cfg2["eval_delay_steps"] == 0 and cfg2["eval_lag_tau_s"] == 0.01
 
 
 if __name__ == "__main__":
@@ -153,6 +169,7 @@ if __name__ == "__main__":
     test_el_entorno_de_evaluacion_ignora_un_intento_de_activar_la_dr()
     test_el_entorno_de_entrenamiento_pasa_los_kwargs()
     test_gamma_conserva_el_horizonte_en_segundos()
+    test_la_evaluacion_se_fija_en_el_punto_medio_del_transporte()
     test_evaluar_la_politica_cero()
     test_corrida_minima_y_reanudacion()
     print("OK")

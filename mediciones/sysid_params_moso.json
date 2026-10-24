@@ -1,92 +1,92 @@
 {
   "pendulum": {
     "derived": {
-      "coulomb_friction_N_m": 5.209340553459034e-05,
-      "inertia_measured_kg_m2": 4.5653525785719086e-05,
+      "coulomb_friction_N_m": 2.9193760833240932e-05,
+      "inertia_measured_kg_m2": 4.563991207289188e-05,
       "inertia_predicted_kg_m2": 4.4473999999999995e-05,
-      "viscous_friction_N_m_s": 5.9392386907935605e-05
+      "viscous_friction_N_m_s": 4.112813410627491e-05
     },
     "fit": {
-      "decay_constant_s_inv": 0.6677203187023386,
+      "decay_constant_s_inv": 0.46238402332008494,
       "decay_constant_s_inv_all_runs": [
-        0.7160746639296176,
-        0.6677203187023386,
-        0.41232759600484564
+        0.4720300277634197,
+        0.4604643681055354,
+        0.46238402332008494
       ],
-      "decay_constant_s_inv_stdev": 0.13326075807399126,
-      "decay_constant_visc_only_s_inv": 0.9448492589999701,
-      "delta_c_per_half_cycle_rad": 0.014874607895844673,
+      "decay_constant_s_inv_stdev": 0.005060686835089043,
+      "decay_constant_visc_only_s_inv": 0.7080947262649478,
+      "delta_c_per_half_cycle_rad": 0.008335906261900745,
       "delta_c_per_half_cycle_rad_all_runs": [
-        0.014874607895844673,
-        0.011135848120684763,
-        0.0312729871215986
+        0.009041235172920676,
+        0.008335906261900745,
+        0.008009464671788863
       ],
-      "delta_c_per_half_cycle_rad_stdev": 0.008745726150082405,
-      "envelope_rmse_combined_rad": 0.04564916649903657,
-      "envelope_rmse_visc_only_rad": 0.11827018426650653,
-      "initial_amplitude_rad": 3.1263500671050815,
-      "mean_pair_amplitude_rad": 0.5250173608687086,
-      "median_run_index": 1,
-      "n_extrema_used": 14,
+      "delta_c_per_half_cycle_rad_stdev": 0.00043058143525562264,
+      "envelope_rmse_combined_rad": 0.03517171739062202,
+      "envelope_rmse_visc_only_rad": 0.11209575986907207,
+      "initial_amplitude_rad": 2.302523737127547,
+      "mean_pair_amplitude_rad": 0.41434526048962855,
+      "median_run_index": 2,
+      "n_extrema_used": 20,
       "n_runs": 3,
-      "omega_d_rad_s": 12.083903321055136,
+      "omega_d_rad_s": 12.187946610479187,
       "omega_d_rad_s_all_runs": [
-        12.277124027971675,
-        12.083903321055136,
-        11.4240469945982
+        12.292759065745889,
+        12.18729134930474,
+        12.187946610479187
       ],
-      "omega_d_rad_s_stdev": 0.36522216039858063,
-      "omega_n_rad_s": 12.10233737327692,
+      "omega_d_rad_s_stdev": 0.04956423369679175,
+      "omega_n_rad_s": 12.196714375802722,
       "omega_n_rad_s_all_runs": [
-        12.297989157684333,
-        12.10233737327692,
-        11.431485633163142
+        12.301818475151878,
+        12.19598695748454,
+        12.196714375802722
       ],
-      "omega_n_rad_s_stdev": 0.3710570540081906,
-      "omega_n_small_amp_rad_s": 12.38643842046025,
+      "omega_n_rad_s_stdev": 0.04971888861855551,
+      "omega_n_small_amp_rad_s": 12.38828562869539,
       "omega_n_small_amp_rad_s_all_runs": [
-        12.410784536065286,
-        12.38643842046025,
-        11.73379525235142
+        12.430575843259115,
+        12.379093147132542,
+        12.38828562869539
       ],
-      "omega_n_small_amp_rad_s_stdev": 0.3135549444121213,
-      "period_s": 0.5199632221677651,
+      "omega_n_small_amp_rad_s_stdev": 0.022418821372504193,
+      "period_s": 0.5155245184432715,
       "period_s_all_runs": [
-        0.5117798999883234,
-        0.5199632221677651,
-        0.5499964513583109
+        0.5111289722327557,
+        0.5155522361035563,
+        0.5155245184432715
       ],
-      "period_s_stdev": 0.016429872577173037,
-      "r_per_half_cycle": 0.840637283287325,
+      "period_s_stdev": 0.0020786442704641764,
+      "r_per_half_cycle": 0.8876434379387989,
       "r_per_half_cycle_all_runs": [
-        0.8325713875900317,
-        0.840637283287325,
-        0.8928029730782385
+        0.8863582085656763,
+        0.888077098333298,
+        0.8876434379387989
       ],
-      "r_per_half_cycle_stdev": 0.026696154020101018,
-      "rest_angle_rad": 0.0007512426399625837,
-      "small_amp_period_s": 0.5072632740660021,
+      "r_per_half_cycle_stdev": 0.0007298750206963702,
+      "rest_angle_rad": 0.003064053598791361,
+      "small_amp_period_s": 0.5071876364091605,
       "small_amp_period_s_all_runs": [
-        0.506268180623141,
-        0.5072632740660021,
-        0.535477667033644
+        0.505462127129601,
+        0.5075642644013068,
+        0.5071876364091605
       ],
-      "small_amp_period_s_stdev": 0.013541033432816537,
-      "zeta": 0.055172839601772036,
+      "small_amp_period_s_stdev": 0.0009151934845465676,
+      "zeta": 0.037910539598878926,
       "zeta_all_runs": [
-        0.058226971478681305,
-        0.055172839601772036,
-        0.03606946719231915
+        0.03837075215480222,
+        0.03775540017472335,
+        0.037910539598878926
       ],
-      "zeta_stdev": 0.00980488288295376
+      "zeta_stdev": 0.00026130482347543727
     }
   },
   "run_meta": {
-    "collected_at": "2026-10-24T00:41:41",
+    "collected_at": "2026-10-24T13:06:48",
     "firmware": "LowLevelServer.ino",
-    "fitted_at": "2026-10-24T00:42:57",
-    "hanging_zero_rad": 0.0,
-    "in_dir": "/Users/max/max/projects/furuta/furuta-pendulum/src/furuta/sysid/sysid_runs/2026-10-24_004126",
+    "fitted_at": "2026-10-24T13:08:01",
+    "hanging_zero_rad": -0.0015339808305725455,
+    "in_dir": "/Users/max/max/projects/furuta/furuta-pendulum/src/furuta/sysid/sysid_runs/2026-10-24_130640",
     "n_free_swing_runs": 3,
     "wizard_version": "2026-05-20"
   }

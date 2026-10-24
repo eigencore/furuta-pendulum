@@ -58,6 +58,20 @@ class TrainConfig:
     resume: Path | None = None
 
 
+def eval_transport(cfg: TrainConfig) -> tuple[int, float]:
+    """Retardo (ticks) y lag τ (s) con los que se evalúa: el punto medio de la DR.
+
+    El entorno de evaluación es determinista pero NO a retardo cero: si todo el
+    entrenamiento tiene ≥ 1 tick de retardo, elegir el mejor modelo sin él lo
+    escogería con una prueba que los episodios de entrenamiento nunca vieron.
+    """
+    if not cfg.domain_randomization:
+        return 0, 0.0
+    delay = int(round(sum(cfg.dr_delay_steps_range) / 2))
+    lag = sum(cfg.dr_lag_tau_range_s) / 2.0
+    return delay, lag
+
+
 def train(cfg: TrainConfig) -> Path:
     """Entrena y devuelve la ruta de `final_model.zip`."""
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
@@ -71,7 +85,10 @@ def train(cfg: TrainConfig) -> Path:
     train_env = DummyVecEnv([make_train_env_fn(
         monitor_path=cfg.run_dir / "monitor.csv", **env_kwargs
     )])
-    eval_env = DummyVecEnv([make_eval_env_fn()])
+    eval_delay, eval_lag = eval_transport(cfg)
+    eval_env = DummyVecEnv([make_eval_env_fn(
+        action_delay_steps=eval_delay, action_lag_tau_s=eval_lag
+    )])
 
     if cfg.resume is not None:
         # Retoma pesos y entropía; el buffer de repetición empieza vacío.
@@ -91,6 +108,8 @@ def train(cfg: TrainConfig) -> Path:
     config = {
         **{k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(cfg).items()},
         "gamma_efectivo": gamma,
+        "eval_delay_steps": eval_delay,
+        "eval_lag_tau_s": eval_lag,
         "control_freq_hz": CONTROL_FREQ_HZ,
         "dispositivo_real": str(model.device),
     }
