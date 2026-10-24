@@ -14,11 +14,16 @@ import mujoco
 import numpy as np
 
 from furuta.sim.pendulum_env import (
+    DEFAULT_PARAMS_PATH,
     GRAVITY,
     MOTOR_LIMIT_RAD,
     PendulumParams,
     build_mjcf,
 )
+
+# Estas pruebas verifican el constructor del MJCF, no un robot concreto: se fija
+# el JSON de referencia (fricción baja) para que no dependan del robot por defecto.
+REFERENCE_PARAMS_PATH = DEFAULT_PARAMS_PATH.parent / "sysid_params_reference.json"
 
 
 def _simulate_free_swing(
@@ -70,7 +75,7 @@ def _mean_period(t: np.ndarray, y: np.ndarray, max_cycles: int = 5) -> float:
 
 
 def test_periodo_oscilacion_libre_coincide_con_teoria() -> None:
-    params = PendulumParams.load()
+    params = PendulumParams.load(REFERENCE_PARAMS_PATH)
     t, y = _simulate_free_swing(params)
 
     measured = _mean_period(t, y)
@@ -86,7 +91,7 @@ def test_periodo_oscilacion_libre_coincide_con_teoria() -> None:
 
 def test_el_pendulo_se_amortigua() -> None:
     """Con fricción > 0 la amplitud debe decaer; sin energía añadida."""
-    params = PendulumParams.load()
+    params = PendulumParams.load(REFERENCE_PARAMS_PATH)
     t, y = _simulate_free_swing(params, amplitude_rad=0.3, duration_s=10.0)
     first = np.max(np.abs(y[: len(y) // 5]))
     last = np.max(np.abs(y[-len(y) // 5:]))
