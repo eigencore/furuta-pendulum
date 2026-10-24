@@ -84,6 +84,29 @@ GRAVITY = 9.81           # m/s²
 # Resolución del encoder AS5600 (12 bits): un LSB = 2π/4096 rad ≈ 0.088°.
 PENDULUM_LSB_RAD = 2.0 * math.pi / 4096.0
 
+# Modelo de medición del firmware (LowLevelServer.ino). El firmware guarda un
+# anillo de muestras del encoder a 500 Hz; GET_STATE devuelve las posiciones de
+# la muestra más nueva y las velocidades como (nueva − vieja)/Δt sobre una
+# ventana de 5 muestras (8 ms). La posición del motor es su contador de pasos;
+# la del péndulo, el AS5600 de 12 bits. Esas diferencias finitas de posiciones
+# CUANTIZADAS reproducen, por el mismo mecanismo, los picos de velocidad del
+# robot: ±1 LSB del péndulo en la ventana ≈ 0.19 rad/s y ±1 paso del motor a
+# 1/32 ≈ 0.12 rad/s (los ~±0.4 rad/s medidos con el péndulo quieto).
+#
+# MOTOR_MICROSTEPS debe coincidir con MICROSTEPS de los sketches: fija qué tan
+# gruesa es la cuantización de la posición del motor.
+MOTOR_MICROSTEPS = 32
+MOTOR_STEP_LSB_RAD = 2.0 * math.pi / (200.0 * MOTOR_MICROSTEPS)
+FIRMWARE_VEL_WINDOW_S = 0.008
+
+# Antigüedad de la lectura cuando el host actúa: edad de la muestra del encoder
+# (0–2 ms a 500 Hz) + ida y vuelta serie del GET_STATE. Sin DR queda fija en el
+# valor nominal; con DR se sortea por episodio. El rango de producción llega a
+# 20 ms porque el robot autónomo mide 15.6 ms; el rango por defecto de abajo
+# NO los contiene y hay que ampliarlo al entrenar.
+OBS_STALENESS_NOMINAL_S = 0.004
+DR_OBS_STALENESS_RANGE_S = (0.002, 0.010)
+
 # --- Control ---------------------------------------------------------------
 
 # Frecuencia de control canónica del robot y valor por defecto del entorno.
@@ -143,6 +166,12 @@ DR_CONTROL_DT_JITTER_FRAC = 0.05
 # 12 bits, y ±1 LSB ya produce picos de ~0.2–0.5 rad/s con el péndulo quieto.
 DR_OBS_NOISE_STD_POS_RAD = 0.005     # σ en la posición del motor y del péndulo
 DR_OBS_NOISE_STD_VEL_RAD_S = 0.15    # σ en las velocidades
+
+# Con el modelo del firmware encendido los picos de velocidad salen del
+# mecanismo (diferencias finitas cuantizadas), y el ruido gaussiano baja a un
+# residuo que cubre lo que el mecanismo no explica (jitter de I²C y de la
+# hora de muestreo). Dejar 0.15 encima contaría dos veces el mismo ruido.
+DR_OBS_NOISE_STD_VEL_RESIDUAL_RAD_S = 0.05
 
 # Sesgo del cero del péndulo, sorteado por episodio. Al arrancar, el firmware
 # toma como cero el ángulo en que quedó el péndulo, que por la fricción seca
@@ -402,7 +431,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
     episodio sortea parámetros físicos (masa, COM, fricción, stiction del
     motor, inclinación de la base), la envolvente de aceleración del motor, el
     lag/retardo del comando, el jitter del paso de control y el ruido de
-    observación. Aún falta el render y el modelo del firmware.
+    observación. Con `firmware_obs_model=True` la observación sale de un
+    modelo mecanístico de la lectura del firmware (cuantización, antigüedad y
+    diferencias finitas). Aún falta el render.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": CONTROL_FREQ_HZ}
@@ -426,6 +457,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
         dr_action_lag_tau_range_s: tuple[float, float] = DR_ACTION_LAG_TAU_RANGE_S,
         action_delay_steps: int = 0,
         action_lag_tau_s: float = 0.0,
+        firmware_obs_model: bool = False,
+        obs_staleness_s: float | None = None,
+        dr_obs_staleness_range_s: tuple[float, float] = DR_OBS_STALENESS_RANGE_S,
     ) -> None:
         super().__init__()
         self.params = PendulumParams.load(params_path)
@@ -478,6 +512,28 @@ class RotaryInvertedPendulumEnv(gym.Env):
             )
         self._action_delay_steps = int(action_delay_steps)
         self._action_lag_tau_s = float(action_lag_tau_s)
+
+        # Modelo de medición del firmware (ver arriba). Apagado, la observación
+        # sale directo del estado de MuJoCo. Encendido, sale de un anillo de
+        # posiciones a ritmo de física, cuantizadas y con antigüedad.
+        lo, hi = dr_obs_staleness_range_s
+        if not (0.0 <= lo <= hi):
+            raise ValueError(
+                f"dr_obs_staleness_range_s debe cumplir 0 <= min <= max, recibí ({lo}, {hi})"
+            )
+        if obs_staleness_s is not None and obs_staleness_s < 0:
+            raise ValueError(f"obs_staleness_s debe ser >= 0, recibí {obs_staleness_s}")
+        self.firmware_obs_model = bool(firmware_obs_model)
+        self._fixed_obs_staleness_s = (
+            float(obs_staleness_s) if obs_staleness_s is not None
+            else OBS_STALENESS_NOMINAL_S
+        )
+        self._dr_obs_staleness_range_s = dr_obs_staleness_range_s
+        self._obs_staleness_s = self._fixed_obs_staleness_s
+        self._meas_motor_pos = 0.0
+        self._meas_pen_phi = 0.0
+        self._meas_motor_vel = 0.0
+        self._meas_pen_vel = 0.0
         self._lagged_accel_cmd = 0.0
         self._accel_cmd_queue: deque[float] = deque()
 
@@ -487,6 +543,14 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # Pasos de física (1 ms) por cada paso de control (20 ms a 50 Hz).
         physics_dt = self.model.opt.timestep
         self._n_substeps = max(1, int(round(1.0 / control_freq_hz / physics_dt)))
+
+        # Anillo de (pos. motor ordenada, ángulo del péndulo), una entrada por
+        # substep de física; cubre la ventana de velocidad + la peor antigüedad.
+        self._meas_win_substeps = max(1, int(round(FIRMWARE_VEL_WINDOW_S / physics_dt)))
+        stale_max_s = max(self._fixed_obs_staleness_s, self._dr_obs_staleness_range_s[1])
+        self._meas_ring: deque[tuple[float, float]] = deque(
+            maxlen=self._meas_win_substeps + int(math.ceil(stale_max_s / physics_dt)) + 2
+        )
 
         # Pasos de control por episodio (8 s × 50 Hz = 400).
         self._max_steps = int(episode_length_s * control_freq_hz)
@@ -591,7 +655,56 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # Recalcula las cantidades derivadas con el nuevo estado (sin avanzar
         # el tiempo).
         mujoco.mj_forward(self.model, self.data)
+        if self.firmware_obs_model:
+            self.seed_measurement_ring()
         return self._obs(), {}
+
+    def seed_measurement_ring(self) -> None:
+        """(Re)llena el anillo de medición con el estado ACTUAL de las articulaciones.
+
+        Extrapola hacia atrás con las velocidades actuales, para que la primera
+        diferencia finita lea la velocidad inicial verdadera. También sirve tras
+        sobrescribir qpos/qvel a mano (herramientas de reproducción y tests).
+        """
+        motor0 = float(self.data.qpos[self._motor_qpos_addr])
+        pen0 = float(self.data.qpos[self._pen_qpos_addr])
+        motor_vel0 = float(self.data.qvel[self._motor_qvel_addr])
+        pen_vel0 = float(self.data.qvel[self._pen_qvel_addr])
+        self._prev_cmd_pos = motor0         # la trayectoria ordenada parte de la posición real
+        dt_p = self.model.opt.timestep
+        n = self._meas_ring.maxlen
+        self._meas_ring.clear()
+        self._meas_ring.extend(
+            (motor0 - motor_vel0 * (n - 1 - k) * dt_p,
+             pen0 - pen_vel0 * (n - 1 - k) * dt_p)
+            for k in range(n)
+        )
+        self._capture_measured_state()
+
+    def _capture_measured_state(self) -> None:
+        """Modela UNA lectura de GET_STATE a partir del anillo de posiciones.
+
+        Las posiciones salen cuantizadas a la resolución del contador de pasos y
+        del AS5600, y con `_obs_staleness_s` de antigüedad; las velocidades son
+        diferencias finitas de esas posiciones cuantizadas en la ventana de 8 ms,
+        así que los picos de un LSB salen del mismo mecanismo que en el robot.
+        """
+        dt_p = self.model.opt.timestep
+        ring = self._meas_ring
+        k_stale = int(round(self._obs_staleness_s / dt_p))
+        idx_new = max(0, len(ring) - 1 - k_stale)
+        idx_old = max(0, idx_new - self._meas_win_substeps)
+        m_new, p_new = ring[idx_new]
+        m_old, p_old = ring[idx_old]
+        mq_new = round(m_new / MOTOR_STEP_LSB_RAD) * MOTOR_STEP_LSB_RAD
+        mq_old = round(m_old / MOTOR_STEP_LSB_RAD) * MOTOR_STEP_LSB_RAD
+        pq_new = round(p_new / PENDULUM_LSB_RAD) * PENDULUM_LSB_RAD
+        pq_old = round(p_old / PENDULUM_LSB_RAD) * PENDULUM_LSB_RAD
+        span_s = max(1, idx_new - idx_old) * dt_p
+        self._meas_motor_pos = mq_new
+        self._meas_pen_phi = pq_new
+        self._meas_motor_vel = (mq_new - mq_old) / span_s
+        self._meas_pen_vel = (pq_new - pq_old) / span_s
 
     def _sample_dr_params(self) -> None:
         """Sortea los parámetros físicos de este episodio y los escribe en `model`.
@@ -646,6 +759,8 @@ class RotaryInvertedPendulumEnv(gym.Env):
         lo, hi = self._dr_action_delay_steps_range
         self._action_delay_steps = int(rng.integers(lo, hi + 1))
         self._action_lag_tau_s = float(rng.uniform(*self._dr_action_lag_tau_range_s))
+        if self.firmware_obs_model:
+            self._obs_staleness_s = float(rng.uniform(*self._dr_obs_staleness_range_s))
 
     def _obs(self) -> np.ndarray:
         """Observación apilada: los últimos `obs_history_len` frames, del más viejo al nuevo.
@@ -671,22 +786,33 @@ class RotaryInvertedPendulumEnv(gym.Env):
         Con `domain_randomization` el frame sale cuantizado y con ruido, y por
         eso consume números aleatorios: sin DR es una función pura del estado.
         """
-        motor_pos = float(self.data.qpos[self._motor_qpos_addr])
-        phi = float(self.data.qpos[self._pen_qpos_addr])
-        motor_vel = float(self.data.qvel[self._motor_qvel_addr])
-        pen_vel = float(self.data.qvel[self._pen_qvel_addr])
+        if self.firmware_obs_model:
+            # Lo que el host leería de verdad: la última lectura de GET_STATE,
+            # ya cuantizada, con antigüedad y con velocidades por diferencias.
+            motor_pos = self._meas_motor_pos
+            phi = self._meas_pen_phi
+            motor_vel = self._meas_motor_vel
+            pen_vel = self._meas_pen_vel
+        else:
+            motor_pos = float(self.data.qpos[self._motor_qpos_addr])
+            phi = float(self.data.qpos[self._pen_qpos_addr])
+            motor_vel = float(self.data.qvel[self._motor_qvel_addr])
+            pen_vel = float(self.data.qvel[self._pen_qvel_addr])
 
         if self.domain_randomization:
             # Lo que el robot real mide: el ángulo del péndulo llega cuantizado
             # al LSB del AS5600, y todas las lecturas traen algo de ruido. Solo
             # la OBSERVACIÓN se ensucia; la física y la recompensa usan el
             # estado verdadero.
-            phi = round(phi / PENDULUM_LSB_RAD) * PENDULUM_LSB_RAD
+            if not self.firmware_obs_model:     # con el modelo ya viene cuantizado
+                phi = round(phi / PENDULUM_LSB_RAD) * PENDULUM_LSB_RAD
             rng = self.np_random
+            vel_std = (DR_OBS_NOISE_STD_VEL_RESIDUAL_RAD_S if self.firmware_obs_model
+                       else DR_OBS_NOISE_STD_VEL_RAD_S)
             motor_pos += rng.normal(0.0, DR_OBS_NOISE_STD_POS_RAD)
             phi += rng.normal(0.0, DR_OBS_NOISE_STD_POS_RAD)
-            motor_vel += rng.normal(0.0, DR_OBS_NOISE_STD_VEL_RAD_S)
-            pen_vel += rng.normal(0.0, DR_OBS_NOISE_STD_VEL_RAD_S)
+            motor_vel += rng.normal(0.0, vel_std)
+            pen_vel += rng.normal(0.0, vel_std)
 
         # Sesgo del cero del encoder: solo la observación, nunca la física.
         phi += self._theta_bias_rad
@@ -767,6 +893,15 @@ class RotaryInvertedPendulumEnv(gym.Env):
             self._motor_vel + accel_cmd * dt,
             -self.max_velocity_rad_s, self.max_velocity_rad_s,
         ))
+        # Corrección complementaria, como el host real: acerca suavemente (10 %
+        # por tick) el integrador de velocidad ordenada a la velocidad MEDIDA,
+        # para que topes o pasos perdidos no acumulen error a lazo abierto. Deja
+        # pasar ~10 % del ruido de cuantización de la medición, que es el
+        # temblor residual con el que entrena la política. La ley P realimenta
+        # el integrador, NO la medición: hacerlo con ganancia f inyecta un
+        # temblor de ±17 rad/s² que destruye el equilibrio (medido en el robot).
+        if self.firmware_obs_model:
+            self._motor_vel += 0.1 * (self._meas_motor_vel - self._motor_vel)
         # En el tope seguro, si la velocidad empuja hacia fuera se anula
         # (imita el recorte del firmware).
         if self._motor_target >= MOTOR_SAFE_LIMIT_RAD and self._motor_vel > 0.0:
@@ -784,8 +919,20 @@ class RotaryInvertedPendulumEnv(gym.Env):
         cmd_start, cmd_end = self._prev_cmd_pos, self._motor_target
         n = n_sub
         for k in range(n):
-            self.data.ctrl[0] = cmd_start + (cmd_end - cmd_start) * (k + 1) / n
+            cmd_k = cmd_start + (cmd_end - cmd_start) * (k + 1) / n
+            self.data.ctrl[0] = cmd_k
             mujoco.mj_step(self.model, self.data)
+            if self.firmware_obs_model:
+                # MOTOR: el firmware lee su propio contador de pasos, o sea la
+                # trayectoria ORDENADA (no la articulación de MuJoCo: el PD es
+                # solo nuestra aproximación del stepper, y su error de
+                # seguimiento metido en la medición crea una oscilación solo de
+                # simulación). PÉNDULO: el AS5600 mide la articulación física.
+                self._meas_ring.append((cmd_k, float(self.data.qpos[self._pen_qpos_addr])))
+        if self.firmware_obs_model:
+            # Una lectura por tick de control, como el GET_STATE del host: esta
+            # instantánea alimenta esta observación y la corrección del siguiente.
+            self._capture_measured_state()
 
         self._prev_cmd_pos = cmd_end
         self._step_count += 1
@@ -815,5 +962,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
             "motor_vel_cmd": self._motor_vel,
             "accel_cmd": accel_cmd,          # aceleración que llegó al motor
             "smoothed_action": smoothed,
+            "obs_staleness_s": self._obs_staleness_s if self.firmware_obs_model else 0.0,
+            "motor_vel_meas": self._meas_motor_vel if self.firmware_obs_model else None,
         }
         return self._obs(), reward, terminated, truncated, info
