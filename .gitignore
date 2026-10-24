@@ -8,6 +8,7 @@ __pycache__/
 
 # Datos crudos de grabaciones (regenerables; los JSON de mediciones/ sí se versionan)
 datos/
+src/furuta/sysid/sysid_runs/
 
 # macOS
 .DS_Store
