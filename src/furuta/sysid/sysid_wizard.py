@@ -648,7 +648,7 @@ def fit_data(in_dir: Path, out_json: Path) -> dict:
     print(_green(f"\n  Wrote {out_json}"))
 
     # Genera las gráficas de validación
-    plot_free_swing_compare(in_dir, derived, out_dir=in_dir)
+    plot_free_swing_compare(in_dir, derived, out_dir=in_dir, params_path=out_json)
     if (in_dir / "motor_sweep.npz").exists():
         plot_motor_sweep(in_dir / "motor_sweep.npz", out_dir=in_dir)
 
@@ -659,7 +659,9 @@ def fit_data(in_dir: Path, out_json: Path) -> dict:
 # Gráficas
 # ---------------------------------------------------------------------------
 
-def plot_free_swing_compare(in_dir: Path, derived: dict, *, out_dir: Path) -> None:
+def plot_free_swing_compare(
+    in_dir: Path, derived: dict, *, out_dir: Path, params_path: Path | str,
+) -> None:
     """Reproduce en simulación la oscilación libre más larga y compara envolventes.
 
     Se alinea en el tiempo con el momento real de la suelta, no con el inicio
@@ -700,11 +702,11 @@ def plot_free_swing_compare(in_dir: Path, derived: dict, *, out_dir: Path) -> No
     release_pos = float(real_pen_trim[0])
     release_vel = float(real_pvel[rel_idx])
 
-    # Simulación con los parámetros derivados que carga el entorno. Nota: el
-    # entorno lee los parámetros de sysid al construirse, así que dependemos
-    # de que `fit_data` acabe de escribir ese archivo.
+    # Simulación con los parámetros que acabamos de ajustar: se pasa la ruta
+    # explícita, para no depender de cuál sea el JSON que el entorno usa por defecto.
     env = RotaryInvertedPendulumEnv(
-        control_freq_hz=200.0, domain_randomization=False,
+        params_path=params_path,
+        control_freq_hz=200.0,
         episode_length_s=real_t_trim[-1] + 0.5,
     )
     env.reset(seed=0)
@@ -716,6 +718,11 @@ def plot_free_swing_compare(in_dir: Path, derived: dict, *, out_dir: Path) -> No
     env.data.qvel[env._motor_qvel_addr] = 0.0
     env.data.qvel[env._pen_qvel_addr]   = release_vel
     env._motor_target = 0.0; env._motor_vel = 0.0
+    # Nuestro reset() pone el brazo en un ángulo aleatorio y el servo sigue
+    # apuntando a ese objetivo viejo: sin esto da un latigazo en el primer paso
+    # y lanza el péndulo. Se alinean también el control y el objetivo previo.
+    env.data.ctrl[0] = 0.0
+    env._prev_cmd_pos = 0.0
     mujoco.mj_forward(env.model, env.data)
 
     n = len(real_t_trim)
