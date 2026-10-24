@@ -155,6 +155,25 @@ DR_OBS_NOISE_STD_VEL_RAD_S = 0.15    # σ en las velocidades
 # evaluación lo apaga con `dr_theta_bias_max_rad=0.0`.
 DR_THETA_BIAS_MAX_RAD = 0.05
 
+# Envolvente de aceleración del motor, sorteada por episodio: el techo REAL
+# del stepper depende de la carga y de su margen de par. Rodea al tope de la
+# ley P (MAX_ACCEL_RAD_S2 = 150) para entrenar con episodios por encima y por
+# debajo; si solo hubiera valores menores, la política nunca tendría la
+# autoridad completa.
+DR_MOTOR_ACCEL_RANGE_RAD_S2 = (110.0, 190.0)
+
+# Transporte del comando: lo que pasa entre que el host calcula la aceleración
+# y el motor la ejecuta (laptop → USB → Arduino → ISR del stepper). Se modela
+# en el comando de ACELERACIÓN, que es lo que de verdad viaja por el cable
+# (la ley P corre en el host, sin retardo). Dos piezas que se componen:
+#  - cola de ticks enteros: apagada por defecto (0, 0). El currículo la
+#    enciende en las etapas 2 y 3 (con el retardo total medido, ≈ 1 tick).
+#  - filtro de primer orden con constante τ: retardo fraccionario. Con
+#    τ = periodo de control sale "mitad comando actual, mitad el anterior",
+#    que es lo medido en el robot.
+DR_ACTION_DELAY_STEPS_RANGE = (0, 0)
+DR_ACTION_LAG_TAU_RANGE_S = (0.0, 0.030)
+
 
 @dataclass(frozen=True)
 class PendulumParams:
@@ -381,9 +400,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
     Bloques 1-7: construcción, reset(), observación apilada, step(),
     recompensa y suavizado de acción. Con `domain_randomization=True` cada
     episodio sortea parámetros físicos (masa, COM, fricción, stiction del
-    motor, inclinación de la base), el jitter del paso de control y el ruido
-    de observación. Aún falta el render, el retardo de acción y el modelo
-    del firmware.
+    motor, inclinación de la base), la envolvente de aceleración del motor, el
+    lag/retardo del comando, el jitter del paso de control y el ruido de
+    observación. Aún falta el render y el modelo del firmware.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": CONTROL_FREQ_HZ}
@@ -402,6 +421,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
         hard_stop_penalty: float = HARD_STOP_PENALTY,
         domain_randomization: bool = False,
         dr_theta_bias_max_rad: float = DR_THETA_BIAS_MAX_RAD,
+        dr_motor_accel_range_rad_s2: tuple[float, float] = DR_MOTOR_ACCEL_RANGE_RAD_S2,
+        dr_action_delay_steps_range: tuple[int, int] = DR_ACTION_DELAY_STEPS_RANGE,
+        dr_action_lag_tau_range_s: tuple[float, float] = DR_ACTION_LAG_TAU_RANGE_S,
     ) -> None:
         super().__init__()
         self.params = PendulumParams.load(params_path)
@@ -429,6 +451,25 @@ class RotaryInvertedPendulumEnv(gym.Env):
             )
         self._dr_theta_bias_max_rad = float(dr_theta_bias_max_rad)
         self._theta_bias_rad = 0.0     # se sortea en cada reset()
+
+        # Rangos de la DR del actuador (se pueden cambiar por etapa del
+        # currículo) y los valores del episodio en curso. Sin DR quedan en el
+        # valor neutro: envolvente = tope de la ley P, sin lag ni retardo.
+        for nombre, (lo, hi), minimo in [
+            ("dr_motor_accel_range_rad_s2", dr_motor_accel_range_rad_s2, 0.0),
+            ("dr_action_delay_steps_range", dr_action_delay_steps_range, 0),
+            ("dr_action_lag_tau_range_s", dr_action_lag_tau_range_s, 0.0),
+        ]:
+            if not (minimo <= lo <= hi):
+                raise ValueError(f"{nombre} debe cumplir {minimo} <= min <= max, recibí ({lo}, {hi})")
+        self._dr_motor_accel_range_rad_s2 = dr_motor_accel_range_rad_s2
+        self._dr_action_delay_steps_range = dr_action_delay_steps_range
+        self._dr_action_lag_tau_range_s = dr_action_lag_tau_range_s
+        self._motor_max_accel_rad_s2 = max_accel_rad_s2
+        self._action_delay_steps = 0
+        self._action_lag_tau_s = 0.0
+        self._lagged_accel_cmd = 0.0
+        self._accel_cmd_queue: deque[float] = deque()
 
         self.model = mujoco.MjModel.from_xml_string(build_mjcf(self.params))
         self.data = mujoco.MjData(self.model)
@@ -529,6 +570,14 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self._action_buf.extend([0.0] * self.action_smooth_window)  # maxlen descarta lo viejo
         self._obs_history.clear()      # _obs() lo rellena con el frame inicial
 
+        # Transporte vacío al empezar: el filtro en 0 y la cola llena de ceros
+        # (los primeros `retardo` ticks no llega ninguna aceleración al motor).
+        # Va DESPUÉS de sortear los parámetros, porque el retardo se sortea ahí.
+        self._lagged_accel_cmd = 0.0
+        self._accel_cmd_queue = deque(
+            [0.0] * self._action_delay_steps, maxlen=self._action_delay_steps + 1
+        )
+
         # Recalcula las cantidades derivadas con el nuevo estado (sin avanzar
         # el tiempo).
         mujoco.mj_forward(self.model, self.data)
@@ -580,6 +629,13 @@ class RotaryInvertedPendulumEnv(gym.Env):
             GRAVITY * math.sin(tilt) * math.sin(azim),
             -GRAVITY * math.cos(tilt),
         )
+
+        # Actuador: envolvente de aceleración y transporte del comando. Estos
+        # sorteos van al final para no alterar la secuencia de los anteriores.
+        self._motor_max_accel_rad_s2 = float(rng.uniform(*self._dr_motor_accel_range_rad_s2))
+        lo, hi = self._dr_action_delay_steps_range
+        self._action_delay_steps = int(rng.integers(lo, hi + 1))
+        self._action_lag_tau_s = float(rng.uniform(*self._dr_action_lag_tau_range_s))
 
     def _obs(self) -> np.ndarray:
         """Observación apilada: los últimos `obs_history_len` frames, del más viejo al nuevo.
@@ -640,6 +696,8 @@ class RotaryInvertedPendulumEnv(gym.Env):
         Cadena (modo velocidad):
             acción ∈ [-1, 1] → promedio de las últimas N → v_des = promedio·3.5 rad/s
             → ley P saturada: accel = (v_des − v_ordenada)·f_control, tope ±150 rad/s²
+            → transporte (con DR): filtro de 1.er orden y cola de ticks, sobre accel
+            → techo de aceleración del motor en este episodio (110–190 con DR)
             → v_ordenada += accel·dt (tope ±3.5 rad/s)
             → objetivo += v_ordenada·dt (tope ±125°)
             → 20 substeps de física con ctrl[0] interpolado hacia el objetivo.
@@ -672,6 +730,27 @@ class RotaryInvertedPendulumEnv(gym.Env):
         v_des = smoothed * self.max_velocity_rad_s
         accel_cmd = (v_des - self._motor_vel) * self.control_freq_hz
         accel_cmd = float(np.clip(accel_cmd, -self.max_accel_rad_s2, self.max_accel_rad_s2))
+
+        # --- Transporte host → motor, sobre el comando de ACELERACIÓN ---
+        # La ley P corre en el host sin retardo; lo que viaja (y se retrasa) es
+        # la aceleración ya calculada. Primero el filtro de 1.er orden (retardo
+        # fraccionario) y luego la cola de ticks enteros; se componen.
+        # alpha = dt/(τ+dt): τ=0 → alpha=1 (sin lag); τ=dt → mitad actual y
+        # mitad anterior. Se usa el periodo NOMINAL de control, sin jitter.
+        if self._action_lag_tau_s > 0.0:
+            dt_ctrl = 1.0 / self.control_freq_hz
+            alpha = dt_ctrl / (self._action_lag_tau_s + dt_ctrl)
+            self._lagged_accel_cmd = (
+                (1.0 - alpha) * self._lagged_accel_cmd + alpha * accel_cmd
+            )
+            accel_cmd = self._lagged_accel_cmd
+        if self._action_delay_steps > 0:
+            self._accel_cmd_queue.append(accel_cmd)
+            accel_cmd = float(self._accel_cmd_queue.popleft())
+        # Techo del stepper en ESTE episodio (sin DR coincide con el de la ley P).
+        accel_cmd = float(np.clip(
+            accel_cmd, -self._motor_max_accel_rad_s2, self._motor_max_accel_rad_s2
+        ))
 
         # --- Aceleración → velocidad → posición objetivo ---
         self._motor_vel = float(np.clip(
@@ -724,6 +803,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
             "phi": phi,
             "motor_target": self._motor_target,
             "motor_vel_cmd": self._motor_vel,
+            "accel_cmd": accel_cmd,          # aceleración que llegó al motor
             "smoothed_action": smoothed,
         }
         return self._obs(), reward, terminated, truncated, info
