@@ -144,6 +144,17 @@ DR_CONTROL_DT_JITTER_FRAC = 0.05
 DR_OBS_NOISE_STD_POS_RAD = 0.005     # σ en la posición del motor y del péndulo
 DR_OBS_NOISE_STD_VEL_RAD_S = 0.15    # σ en las velocidades
 
+# Sesgo del cero del péndulo, sorteado por episodio. Al arrancar, el firmware
+# toma como cero el ángulo en que quedó el péndulo, que por la fricción seca
+# solo está a ±F_c/(m·g·d) ≈ ±2° de la vertical colgando. Sin esta DR la
+# política aprende a llevar el θ OBSERVADO a 0; en el robot eso es llevar el θ
+# real a −sesgo, la gravedad deja un par restaurador constante y nunca logra
+# quedarse quieta. Solo afecta a la OBSERVACIÓN (la física y la recompensa no).
+# 0.05 rad ≈ 2.9° cubre la banda medida con margen. A diferencia del resto de
+# la DR, está activo por defecto aunque `domain_randomization` sea False; la
+# evaluación lo apaga con `dr_theta_bias_max_rad=0.0`.
+DR_THETA_BIAS_MAX_RAD = 0.05
+
 
 @dataclass(frozen=True)
 class PendulumParams:
@@ -390,6 +401,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         reward_weights: RewardWeights | None = None,
         hard_stop_penalty: float = HARD_STOP_PENALTY,
         domain_randomization: bool = False,
+        dr_theta_bias_max_rad: float = DR_THETA_BIAS_MAX_RAD,
     ) -> None:
         super().__init__()
         self.params = PendulumParams.load(params_path)
@@ -407,9 +419,16 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self.action_smooth_window = action_smooth_window
         self.reward_weights = reward_weights or RewardWeights()
         self.hard_stop_penalty = hard_stop_penalty
-        # False = determinista con los parámetros nominales (evaluación y
-        # depuración); True = un robot distinto por episodio (entrenamiento).
+        # False = parámetros nominales (evaluación y depuración); True = un
+        # robot distinto por episodio (entrenamiento).
         self.domain_randomization = domain_randomization
+        # El sesgo θ es independiente de la DR (ver DR_THETA_BIAS_MAX_RAD).
+        if dr_theta_bias_max_rad < 0:
+            raise ValueError(
+                f"dr_theta_bias_max_rad debe ser >= 0, recibí {dr_theta_bias_max_rad}"
+            )
+        self._dr_theta_bias_max_rad = float(dr_theta_bias_max_rad)
+        self._theta_bias_rad = 0.0     # se sortea en cada reset()
 
         self.model = mujoco.MjModel.from_xml_string(build_mjcf(self.params))
         self.data = mujoco.MjData(self.model)
@@ -477,6 +496,15 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # `model`, así que la DR los reescribe aquí, una vez por episodio.
         if self.domain_randomization:
             self._sample_dr_params()
+
+        # Sesgo del cero del encoder: fuera del `if` de arriba a propósito (ver
+        # DR_THETA_BIAS_MAX_RAD). Con 0.0 no se gasta ningún número aleatorio.
+        if self._dr_theta_bias_max_rad > 0.0:
+            self._theta_bias_rad = float(self.np_random.uniform(
+                -self._dr_theta_bias_max_rad, self._dr_theta_bias_max_rad
+            ))
+        else:
+            self._theta_bias_rad = 0.0
 
         # Motor: posición aleatoria dentro del 70 % del límite seguro (≈ ±87°),
         # para que la política aprenda a volver desde cualquier punto del
@@ -593,6 +621,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
             phi += rng.normal(0.0, DR_OBS_NOISE_STD_POS_RAD)
             motor_vel += rng.normal(0.0, DR_OBS_NOISE_STD_VEL_RAD_S)
             pen_vel += rng.normal(0.0, DR_OBS_NOISE_STD_VEL_RAD_S)
+
+        # Sesgo del cero del encoder: solo la observación, nunca la física.
+        phi += self._theta_bias_rad
 
         theta = _wrap_pi(phi - math.pi)
         return np.array(

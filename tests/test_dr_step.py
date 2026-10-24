@@ -54,7 +54,8 @@ def test_sin_dr_la_observacion_es_el_estado_verdadero() -> None:
 
 def test_el_ruido_de_observacion_tiene_la_desviacion_esperada() -> None:
     """Compara lo que ve la política con el estado verdadero de MuJoCo."""
-    env = RotaryInvertedPendulumEnv(domain_randomization=True)
+    # Sin sesgo θ: aquí se mide solo el ruido (el sesgo tiene su propio test).
+    env = RotaryInvertedPendulumEnv(domain_randomization=True, dr_theta_bias_max_rad=0.0)
     e_mot, e_pen, e_mvel, e_pvel = [], [], [], []
     for seed in range(4):
         env.reset(seed=seed)
@@ -86,7 +87,7 @@ def test_el_angulo_del_pendulo_llega_cuantizado_al_lsb() -> None:
     original = pendulum_env.DR_OBS_NOISE_STD_POS_RAD
     pendulum_env.DR_OBS_NOISE_STD_POS_RAD = 0.0
     try:
-        env = RotaryInvertedPendulumEnv(domain_randomization=True)
+        env = RotaryInvertedPendulumEnv(domain_randomization=True, dr_theta_bias_max_rad=0.0)
         env.reset(seed=1)
         for _ in range(50):
             obs, *_ = env.step(np.array([0.5]))
