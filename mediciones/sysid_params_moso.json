@@ -1,0 +1,93 @@
+{
+  "pendulum": {
+    "derived": {
+      "coulomb_friction_N_m": 5.209340553459034e-05,
+      "inertia_measured_kg_m2": 4.5653525785719086e-05,
+      "inertia_predicted_kg_m2": 4.4473999999999995e-05,
+      "viscous_friction_N_m_s": 5.9392386907935605e-05
+    },
+    "fit": {
+      "decay_constant_s_inv": 0.6677203187023386,
+      "decay_constant_s_inv_all_runs": [
+        0.7160746639296176,
+        0.6677203187023386,
+        0.41232759600484564
+      ],
+      "decay_constant_s_inv_stdev": 0.13326075807399126,
+      "decay_constant_visc_only_s_inv": 0.9448492589999701,
+      "delta_c_per_half_cycle_rad": 0.014874607895844673,
+      "delta_c_per_half_cycle_rad_all_runs": [
+        0.014874607895844673,
+        0.011135848120684763,
+        0.0312729871215986
+      ],
+      "delta_c_per_half_cycle_rad_stdev": 0.008745726150082405,
+      "envelope_rmse_combined_rad": 0.04564916649903657,
+      "envelope_rmse_visc_only_rad": 0.11827018426650653,
+      "initial_amplitude_rad": 3.1263500671050815,
+      "mean_pair_amplitude_rad": 0.5250173608687086,
+      "median_run_index": 1,
+      "n_extrema_used": 14,
+      "n_runs": 3,
+      "omega_d_rad_s": 12.083903321055136,
+      "omega_d_rad_s_all_runs": [
+        12.277124027971675,
+        12.083903321055136,
+        11.4240469945982
+      ],
+      "omega_d_rad_s_stdev": 0.36522216039858063,
+      "omega_n_rad_s": 12.10233737327692,
+      "omega_n_rad_s_all_runs": [
+        12.297989157684333,
+        12.10233737327692,
+        11.431485633163142
+      ],
+      "omega_n_rad_s_stdev": 0.3710570540081906,
+      "omega_n_small_amp_rad_s": 12.38643842046025,
+      "omega_n_small_amp_rad_s_all_runs": [
+        12.410784536065286,
+        12.38643842046025,
+        11.73379525235142
+      ],
+      "omega_n_small_amp_rad_s_stdev": 0.3135549444121213,
+      "period_s": 0.5199632221677651,
+      "period_s_all_runs": [
+        0.5117798999883234,
+        0.5199632221677651,
+        0.5499964513583109
+      ],
+      "period_s_stdev": 0.016429872577173037,
+      "r_per_half_cycle": 0.840637283287325,
+      "r_per_half_cycle_all_runs": [
+        0.8325713875900317,
+        0.840637283287325,
+        0.8928029730782385
+      ],
+      "r_per_half_cycle_stdev": 0.026696154020101018,
+      "rest_angle_rad": 0.0007512426399625837,
+      "small_amp_period_s": 0.5072632740660021,
+      "small_amp_period_s_all_runs": [
+        0.506268180623141,
+        0.5072632740660021,
+        0.535477667033644
+      ],
+      "small_amp_period_s_stdev": 0.013541033432816537,
+      "zeta": 0.055172839601772036,
+      "zeta_all_runs": [
+        0.058226971478681305,
+        0.055172839601772036,
+        0.03606946719231915
+      ],
+      "zeta_stdev": 0.00980488288295376
+    }
+  },
+  "run_meta": {
+    "collected_at": "2026-10-24T00:41:41",
+    "firmware": "LowLevelServer.ino",
+    "fitted_at": "2026-10-24T00:42:57",
+    "hanging_zero_rad": 0.0,
+    "in_dir": "/Users/max/max/projects/furuta/furuta-pendulum/src/furuta/sysid/sysid_runs/2026-10-24_004126",
+    "n_free_swing_runs": 3,
+    "wizard_version": "2026-05-20"
+  }
+}

@@ -50,7 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 # que describe, en lugar de un genérico `sysid_params.json`, para que en una
 # configuración con varios robots no se entrene en silencio con el robot que
 # se haya medido último. Para cualquier otro robot, pasa `--params-path`.
-DEFAULT_PARAMS_PATH = REPO_ROOT / "mediciones" / "sysid_params_reference.json"
+DEFAULT_PARAMS_PATH = REPO_ROOT / "mediciones" / "sysid_params_moso.json"
 
 # --- Límites del motor -----------------------------------------------------
 
