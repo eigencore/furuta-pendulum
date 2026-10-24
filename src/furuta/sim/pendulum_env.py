@@ -102,6 +102,30 @@ MAX_VELOCITY_RAD_S = 3.5
 # firmware) 100 kpasos/s² serían ≈ 98 rad/s². Verificar contra el firmware.
 MAX_ACCEL_RAD_S2 = 150.0
 
+# --- Aleatorización de dominio (DR) ------------------------------------------
+# Se activa con `domain_randomization=True`. Cada episodio se sortea un robot
+# distinto alrededor de los valores nominales (sysid + URDF), para que la
+# política no se sobreajuste a un solo conjunto de números. Los rangos cubren
+# lo medido con algo de margen; no deben incluir regímenes imposibles.
+
+DR_PENDULUM_MASS_FRAC = 0.10      # masa del péndulo: nominal × (1 ± 0.10)
+DR_PENDULUM_COM_FRAC = 0.10       # distancia al COM: nominal × (1 ± 0.10)
+
+# Multiplicador de la fricción del péndulo. Es UNO solo y se aplica a la
+# viscosa y a la de Coulomb: ambas salen del mismo rodamiento (grasa,
+# temperatura, asiento de las bolas) y varían juntas.
+DR_PENDULUM_FRICTION_MULT_RANGE = (0.5, 2.0)
+
+# Fricción seca del joint del motor (N·m). El stepper real tiene un par de
+# detención que el actuador de posición no captura. El 0 está dentro del rango
+# para que aparezcan episodios sin stiction.
+DR_MOTOR_FRICTIONLOSS_RANGE_N_M = (0.0, 0.005)
+
+# Inclinación de la base: la mesa no está perfectamente nivelada. Se modela
+# girando el vector de gravedad (ángulo en [0, máx], dirección en [0, 2π)).
+# 0.017 rad ≈ 1°. Mueve la vertical VERDADERA según la posición del brazo.
+DR_BASE_TILT_MAX_RAD = 0.017
+
 
 @dataclass(frozen=True)
 class PendulumParams:
@@ -326,8 +350,10 @@ class RotaryInvertedPendulumEnv(gym.Env):
     así que θ = phi − π (se convierte al construir la observación).
 
     Bloques 1-7: construcción, reset(), observación apilada, step(),
-    recompensa y suavizado de acción. Aún falta el render, la
-    aleatorización de dominio y el modelo del firmware.
+    recompensa y suavizado de acción. Con `domain_randomization=True` cada
+    episodio sortea parámetros físicos (masa, COM, fricción, stiction del
+    motor, inclinación de la base). Aún falta el render, el ruido/jitter/
+    retardo y el modelo del firmware.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": CONTROL_FREQ_HZ}
@@ -344,6 +370,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         action_smooth_window: int = ACTION_SMOOTH_WINDOW,
         reward_weights: RewardWeights | None = None,
         hard_stop_penalty: float = HARD_STOP_PENALTY,
+        domain_randomization: bool = False,
     ) -> None:
         super().__init__()
         self.params = PendulumParams.load(params_path)
@@ -361,6 +388,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self.action_smooth_window = action_smooth_window
         self.reward_weights = reward_weights or RewardWeights()
         self.hard_stop_penalty = hard_stop_penalty
+        # False = determinista con los parámetros nominales (evaluación y
+        # depuración); True = un robot distinto por episodio (entrenamiento).
+        self.domain_randomization = domain_randomization
 
         self.model = mujoco.MjModel.from_xml_string(build_mjcf(self.params))
         self.data = mujoco.MjData(self.model)
@@ -382,6 +412,8 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self._motor_qvel_addr = int(motor.dofadr[0])
         self._pen_qpos_addr = int(pendulum.qposadr[0])
         self._pen_qvel_addr = int(pendulum.dofadr[0])
+        # Id del cuerpo del péndulo: la DR modifica su masa, inercia y COM.
+        self._pen_body_id = int(self.model.body("pendulum").id)
 
         # Acción: un número en [-1, 1] que luego se escala a ±max_velocity.
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
@@ -423,6 +455,11 @@ class RotaryInvertedPendulumEnv(gym.Env):
         super().reset(seed=seed)       # inicializa self.np_random con la semilla
         mujoco.mj_resetData(self.model, self.data)
 
+        # `mj_resetData` solo limpia `data`; los parámetros físicos viven en
+        # `model`, así que la DR los reescribe aquí, una vez por episodio.
+        if self.domain_randomization:
+            self._sample_dr_params()
+
         # Motor: posición aleatoria dentro del 70 % del límite seguro (≈ ±87°),
         # para que la política aprenda a volver desde cualquier punto del
         # rango y no solo desde el centro.
@@ -450,6 +487,53 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # el tiempo).
         mujoco.mj_forward(self.model, self.data)
         return self._obs(), {}
+
+    def _sample_dr_params(self) -> None:
+        """Sortea los parámetros físicos de este episodio y los escribe en `model`.
+
+        Usa `self.np_random`, así que `reset(seed=...)` lo hace reproducible.
+        """
+        rng = self.np_random
+        nominal = self.params
+        pen = self._pen_body_id
+
+        # Masa y distancia al COM. La inercia propia respecto al COM es una
+        # propiedad geométrica de la pieza (viene del CAD) y NO se sortea:
+        # MuJoCo aplica Steiner solo, así que la inercia respecto al pivote
+        # resulta m·d² + I_com con los valores sorteados.
+        m = rng.uniform(
+            nominal.pendulum_mass_kg * (1.0 - DR_PENDULUM_MASS_FRAC),
+            nominal.pendulum_mass_kg * (1.0 + DR_PENDULUM_MASS_FRAC),
+        )
+        d = rng.uniform(
+            nominal.pendulum_com_m * (1.0 - DR_PENDULUM_COM_FRAC),
+            nominal.pendulum_com_m * (1.0 + DR_PENDULUM_COM_FRAC),
+        )
+        self.model.body_mass[pen] = m
+        self.model.body_inertia[pen] = (
+            PENDULUM_I_COM_SWING_KG_M2, PENDULUM_I_COM_SWING_KG_M2, 1e-7
+        )
+        self.model.body_ipos[pen, 2] = -d       # COM a -d en z (colgando)
+
+        # Fricción del péndulo: mismo multiplicador para viscosa y Coulomb.
+        fric_mult = rng.uniform(*DR_PENDULUM_FRICTION_MULT_RANGE)
+        self.model.dof_damping[self._pen_qvel_addr] = nominal.pendulum_friction * fric_mult
+        self.model.dof_frictionloss[self._pen_qvel_addr] = nominal.pendulum_coulomb * fric_mult
+
+        # Stiction del motor.
+        self.model.dof_frictionloss[self._motor_qvel_addr] = rng.uniform(
+            *DR_MOTOR_FRICTIONLOSS_RANGE_N_M
+        )
+
+        # Inclinación de la base: se gira la gravedad un ángulo pequeño alrededor
+        # de un eje horizontal al azar. Su módulo se conserva (g sigue valiendo 9.81).
+        tilt = rng.uniform(0.0, DR_BASE_TILT_MAX_RAD)
+        azim = rng.uniform(0.0, 2.0 * math.pi)
+        self.model.opt.gravity[:] = (
+            GRAVITY * math.sin(tilt) * math.cos(azim),
+            GRAVITY * math.sin(tilt) * math.sin(azim),
+            -GRAVITY * math.cos(tilt),
+        )
 
     def _obs(self) -> np.ndarray:
         """Observación apilada: los últimos `obs_history_len` frames, del más viejo al nuevo.
