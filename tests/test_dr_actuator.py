@@ -37,6 +37,30 @@ def test_sin_dr_el_actuador_es_neutro() -> None:
     assert env.step(UNO)[4]["accel_cmd"] == MAX_ACCEL_RAD_S2
 
 
+def test_retardo_y_lag_fijos_sin_dr_son_deterministas() -> None:
+    cola = RotaryInvertedPendulumEnv(action_smooth_window=1, action_delay_steps=2)
+    assert _accels(cola, 3) == [0.0, 0.0, MAX_ACCEL_RAD_S2]
+    lag = RotaryInvertedPendulumEnv(action_smooth_window=1, action_lag_tau_s=0.02)
+    assert _accels(lag, 1) == [0.5 * MAX_ACCEL_RAD_S2]
+    # Dos episodios seguidos dan lo mismo: nada se sortea.
+    assert _accels(lag, 3, seed=1) == _accels(lag, 3, seed=2)
+
+
+def test_con_dr_el_sorteo_reemplaza_a_los_valores_fijos() -> None:
+    env = _env(action_delay_steps=2, action_lag_tau_s=0.05)    # rangos fijados en (0, 0)
+    env.reset(seed=0)
+    assert env._action_delay_steps == 0 and env._action_lag_tau_s == 0.0
+
+
+def test_los_valores_fijos_negativos_se_rechazan() -> None:
+    for kw in ({"action_delay_steps": -1}, {"action_lag_tau_s": -0.01}):
+        try:
+            RotaryInvertedPendulumEnv(**kw)
+        except ValueError:
+            continue
+        raise AssertionError(f"debió lanzar ValueError con {kw}")
+
+
 def test_los_rangos_no_hacen_nada_sin_dr() -> None:
     env = _env(
         domain_randomization=False,
@@ -148,6 +172,9 @@ def test_rangos_invalidos_se_rechazan() -> None:
 
 
 if __name__ == "__main__":
+    test_retardo_y_lag_fijos_sin_dr_son_deterministas()
+    test_con_dr_el_sorteo_reemplaza_a_los_valores_fijos()
+    test_los_valores_fijos_negativos_se_rechazan()
     test_sin_dr_el_actuador_es_neutro()
     test_los_rangos_no_hacen_nada_sin_dr()
     test_la_envolvente_recorta_la_aceleracion()

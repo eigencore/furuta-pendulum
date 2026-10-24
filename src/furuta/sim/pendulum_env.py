@@ -424,6 +424,8 @@ class RotaryInvertedPendulumEnv(gym.Env):
         dr_motor_accel_range_rad_s2: tuple[float, float] = DR_MOTOR_ACCEL_RANGE_RAD_S2,
         dr_action_delay_steps_range: tuple[int, int] = DR_ACTION_DELAY_STEPS_RANGE,
         dr_action_lag_tau_range_s: tuple[float, float] = DR_ACTION_LAG_TAU_RANGE_S,
+        action_delay_steps: int = 0,
+        action_lag_tau_s: float = 0.0,
     ) -> None:
         super().__init__()
         self.params = PendulumParams.load(params_path)
@@ -466,8 +468,16 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self._dr_action_delay_steps_range = dr_action_delay_steps_range
         self._dr_action_lag_tau_range_s = dr_action_lag_tau_range_s
         self._motor_max_accel_rad_s2 = max_accel_rad_s2
-        self._action_delay_steps = 0
-        self._action_lag_tau_s = 0.0
+        # Retardo y lag FIJOS, para un entorno determinista con el transporte del
+        # robot real (el de evaluación). Con DR se vuelven a sortear en cada
+        # reset() y estos valores solo son los del primer episodio.
+        if action_delay_steps < 0 or action_lag_tau_s < 0:
+            raise ValueError(
+                "action_delay_steps y action_lag_tau_s deben ser >= 0, "
+                f"recibí ({action_delay_steps}, {action_lag_tau_s})"
+            )
+        self._action_delay_steps = int(action_delay_steps)
+        self._action_lag_tau_s = float(action_lag_tau_s)
         self._lagged_accel_cmd = 0.0
         self._accel_cmd_queue: deque[float] = deque()
 
