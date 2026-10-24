@@ -30,14 +30,18 @@ def make_train_env_fn(*, monitor_path: Path | None = None, **env_kwargs: Any) ->
     return _init
 
 
-def make_eval_env_fn(**env_kwargs: Any) -> EnvFactory:
+def make_eval_env_fn(*, firmware_obs_model: bool = True, **env_kwargs: Any) -> EnvFactory:
     """Entorno de evaluación: determinista, sin DR y sin sesgo θ.
 
     Es la referencia fija con la que se elige el mejor modelo: si evaluara con
     DR, el ruido de un episodio a otro taparía las diferencias entre modelos.
+    Por defecto usa el modelo de medición del firmware, que es parte de la
+    planta del robot real (no una aleatorización): sin ruido, pero con la misma
+    cuantización y antigüedad nominal con la que se entrenó.
     """
     env_kwargs = {
         **env_kwargs,
+        "firmware_obs_model": firmware_obs_model,
         "domain_randomization": False,
         "dr_theta_bias_max_rad": 0.0,
     }

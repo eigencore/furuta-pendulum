@@ -32,14 +32,17 @@ RECAPTURE_THETA_RAD = 1.0
 # DR completa, retardo de 1 tick y lag de hasta 15 ms.
 DEPLOY_DELAY_STEPS_RANGE = (1, 1)
 DEPLOY_LAG_TAU_RANGE_S = (0.0, 0.015)
+DEPLOY_OBS_STALENESS_RANGE_S = (0.002, 0.020)    # cubre los 15.6 ms medidos en el robot
 
 
-def make_deploy_env_fn() -> EnvFactory:
+def make_deploy_env_fn(*, firmware_obs_model: bool = True) -> EnvFactory:
     """Entorno con las condiciones de despliegue (DR completa)."""
     return make_train_env_fn(
         domain_randomization=True,
         dr_action_delay_steps_range=DEPLOY_DELAY_STEPS_RANGE,
         dr_action_lag_tau_range_s=DEPLOY_LAG_TAU_RANGE_S,
+        firmware_obs_model=firmware_obs_model,
+        dr_obs_staleness_range_s=DEPLOY_OBS_STALENESS_RANGE_S,
     )
 
 
@@ -95,10 +98,15 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--dr", action="store_true",
                     help="evalúa con DR completa y retardo de despliegue (robustez)")
+    ap.add_argument("--no-firmware-obs-model", action="store_true",
+                    help="observación directa del estado, sin el modelo del firmware "
+                         "(para modelos entrenados sin él)")
     args = ap.parse_args()
 
     model = SAC.load(args.modelo, device=args.device)
-    env_fn = make_deploy_env_fn() if args.dr else None
+    fw = not args.no_firmware_obs_model
+    env_fn = make_deploy_env_fn(firmware_obs_model=fw) if args.dr else make_eval_env_fn(
+        firmware_obs_model=fw)
     res = evaluate_model(model, n_episodes=args.episodes, seed=args.seed, env_fn=env_fn)
     for clave, valor in res.items():
         print(f"{clave:15s} {valor:10.1f}")
