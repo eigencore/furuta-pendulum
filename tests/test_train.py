@@ -106,17 +106,30 @@ def test_gamma_conserva_el_horizonte_en_segundos() -> None:
 
 def test_la_evaluacion_se_fija_en_el_punto_medio_del_transporte() -> None:
     base = Path("runs/x")
-    assert eval_transport(TrainConfig(run_dir=base)) == (0, 0.0)             # etapa 1: sin DR
+    # Etapa 1 (sin DR): nada fijo, antigüedad nominal del entorno.
+    assert eval_transport(TrainConfig(run_dir=base)) == (0, 0.0, None)
     etapa2 = TrainConfig(run_dir=base, domain_randomization=True,
                          dr_delay_steps_range=(0, 1), dr_lag_tau_range_s=(0.0, 0.020))
-    assert eval_transport(etapa2) == (0, 0.010)
+    assert eval_transport(etapa2) == (0, 0.010, 0.011)          # antigüedad: (2+20)/2 ms
     etapa3 = TrainConfig(run_dir=base, domain_randomization=True,
                          dr_delay_steps_range=(1, 1), dr_lag_tau_range_s=(0.0, 0.015))
-    assert eval_transport(etapa3) == (1, 0.0075)
+    t3 = eval_transport(etapa3)
+    assert (t3.delay_steps, t3.lag_tau_s) == (1, 0.0075) and abs(t3.obs_staleness_s - 0.011) < 1e-12
+    # Sin el modelo del firmware no hay antigüedad que fijar.
+    assert eval_transport(TrainConfig(run_dir=base, domain_randomization=True,
+                                      firmware_obs_model=False)).obs_staleness_s is None
     # El entorno de evaluación recibe ese transporte, sigue sin DR y sin sesgo.
-    base_env = make_eval_env_fn(action_delay_steps=1, action_lag_tau_s=0.0075)().unwrapped
+    base_env = make_eval_env_fn(action_delay_steps=1, action_lag_tau_s=0.0075,
+                                obs_staleness_s=0.011)().unwrapped
     assert (base_env._action_delay_steps, base_env._action_lag_tau_s) == (1, 0.0075)
+    assert base_env._obs_staleness_s == 0.011 and base_env.firmware_obs_model is True
     assert base_env.domain_randomization is False and base_env._dr_theta_bias_max_rad == 0.0
+
+
+def test_el_punto_canonico_es_el_valor_por_defecto() -> None:
+    cfg = TrainConfig(run_dir=Path("runs/x"))
+    assert cfg.firmware_obs_model is True and cfg.mirror_augment is True
+    assert cfg.dr_obs_staleness_range_s == (0.002, 0.020)
 
 
 def test_evaluar_la_politica_cero() -> None:
@@ -128,6 +141,23 @@ def test_evaluar_la_politica_cero() -> None:
     assert res["tope_duro_%"] == 0.0
     assert res["recaptura_%"] == 0.0                 # nunca llega arriba
     assert math.isnan(res["tiempo_arriba_s"])
+
+
+def model_buffer_size(run_dir: Path) -> int:
+    return SAC.load(run_dir / "final_model.zip", device="cpu").buffer_size
+
+
+def test_la_receta_antigua_sigue_disponible() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        run = Path(tmp) / "antigua"
+        train(TrainConfig(
+            run_dir=run, total_steps=200, eval_freq=200, n_eval_episodes=1, device="cpu",
+            net_arch=(16, 16), firmware_obs_model=False, mirror_augment=False,
+        ))
+        cfg = json.loads((run / "config.json").read_text())
+        assert cfg["clase_del_buffer"] == "ReplayBuffer"
+        assert model_buffer_size(run) == 200_000
+        assert cfg["eval_obs_staleness_s"] is None
 
 
 def test_corrida_minima_y_reanudacion() -> None:
@@ -142,6 +172,8 @@ def test_corrida_minima_y_reanudacion() -> None:
         cfg = json.loads((run1 / "config.json").read_text())
         assert math.isclose(cfg["gamma_efectivo"], default_gamma())
         assert cfg["domain_randomization"] is False
+        assert cfg["clase_del_buffer"] == "MirrorReplayBuffer"
+        assert model_buffer_size(run1) == 400_000
 
         # El modelo guardado se carga y se puede evaluar.
         model = SAC.load(final, device="cpu")
@@ -159,6 +191,8 @@ def test_corrida_minima_y_reanudacion() -> None:
         cfg2 = json.loads((run2 / "config.json").read_text())
         assert cfg2["domain_randomization"] is True and cfg2["resume"] == str(final)
         assert cfg2["eval_delay_steps"] == 0 and cfg2["eval_lag_tau_s"] == 0.01
+        assert abs(cfg2["eval_obs_staleness_s"] - 0.011) < 1e-12
+        assert cfg2["clase_del_buffer"] == "MirrorReplayBuffer"
 
 
 if __name__ == "__main__":
@@ -170,6 +204,8 @@ if __name__ == "__main__":
     test_el_entorno_de_entrenamiento_pasa_los_kwargs()
     test_gamma_conserva_el_horizonte_en_segundos()
     test_la_evaluacion_se_fija_en_el_punto_medio_del_transporte()
+    test_el_punto_canonico_es_el_valor_por_defecto()
     test_evaluar_la_politica_cero()
+    test_la_receta_antigua_sigue_disponible()
     test_corrida_minima_y_reanudacion()
     print("OK")

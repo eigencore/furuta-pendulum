@@ -1,8 +1,9 @@
 """Muestra una política entrenada (SB3) controlando el péndulo en el visor.
 
 Corre varios episodios seguidos con la política determinista y el entorno de
-evaluación (sin DR ni sesgo θ). Con --dr usa el entorno de entrenamiento con
-toda la aleatorización, para ver qué tan robusta es.
+evaluación (sin DR ni sesgo θ, con el modelo de medición del firmware). Con --dr
+usa las condiciones de despliegue (DR completa, retardo y antigüedad de la
+observación), para ver qué tan robusta es.
 
 Uso (en macOS el visor exige `mjpython`):
     uv run mjpython scripts/see_policy.py runs/etapa1/best_model.zip
@@ -29,6 +30,11 @@ from stable_baselines3 import SAC
 
 from furuta.sim.pendulum_env import CONTROL_FREQ_HZ, RotaryInvertedPendulumEnv, _wrap_pi
 from furuta.sim.visual import build_visual_model
+from furuta.train.evaluate import (
+    DEPLOY_DELAY_STEPS_RANGE,
+    DEPLOY_LAG_TAU_RANGE_S,
+    DEPLOY_OBS_STALENESS_RANGE_S,
+)
 
 
 def _linea(env: RotaryInvertedPendulumEnv, paso: int, accion: float) -> str:
@@ -45,7 +51,9 @@ def main() -> None:
     ap.add_argument("--episodios", type=int, default=3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dr", action="store_true",
-                    help="entorno de entrenamiento con DR completa")
+                    help="condiciones de despliegue: DR completa, retardo y antigüedad")
+    ap.add_argument("--no-firmware-obs-model", action="store_true",
+                    help="observación directa del estado (para modelos entrenados sin el modelo)")
     ap.add_argument("--params", type=Path, default=None,
                     help="sysid_params_*.json (por defecto, el de moso)")
     ap.add_argument("--sin-mallas", action="store_true",
@@ -55,10 +63,17 @@ def main() -> None:
     args = ap.parse_args()
 
     model = SAC.load(args.modelo, device="cpu")
+    fw = not args.no_firmware_obs_model
     if args.dr:
-        env = RotaryInvertedPendulumEnv(params_path=args.params, domain_randomization=True)
+        env = RotaryInvertedPendulumEnv(
+            params_path=args.params, domain_randomization=True, firmware_obs_model=fw,
+            dr_action_delay_steps_range=DEPLOY_DELAY_STEPS_RANGE,
+            dr_action_lag_tau_range_s=DEPLOY_LAG_TAU_RANGE_S,
+            dr_obs_staleness_range_s=DEPLOY_OBS_STALENESS_RANGE_S,
+        )
     else:
-        env = RotaryInvertedPendulumEnv(params_path=args.params, dr_theta_bias_max_rad=0.0)
+        env = RotaryInvertedPendulumEnv(
+            params_path=args.params, dr_theta_bias_max_rad=0.0, firmware_obs_model=fw)
     cada = int(CONTROL_FREQ_HZ)            # una línea por segundo simulado
 
     def episodio(ep: int, al_paso=None) -> None:
