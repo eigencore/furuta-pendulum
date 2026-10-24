@@ -81,6 +81,9 @@ ARM_COM_M = 0.035        # m, centro de masa medido desde el eje del motor
 
 GRAVITY = 9.81           # m/s²
 
+# Resolución del encoder AS5600 (12 bits): un LSB = 2π/4096 rad ≈ 0.088°.
+PENDULUM_LSB_RAD = 2.0 * math.pi / 4096.0
+
 # --- Control ---------------------------------------------------------------
 
 # Frecuencia de control canónica del robot y valor por defecto del entorno.
@@ -125,6 +128,21 @@ DR_MOTOR_FRICTIONLOSS_RANGE_N_M = (0.0, 0.005)
 # girando el vector de gravedad (ángulo en [0, máx], dirección en [0, 2π)).
 # 0.017 rad ≈ 1°. Mueve la vertical VERDADERA según la posición del brazo.
 DR_BASE_TILT_MAX_RAD = 0.017
+
+# Jitter del paso de control: cada tick, el número de substeps de física se
+# multiplica por (1 ± 0.05) (a 50 Hz: 19, 20 o 21 substeps en vez de 20 fijos).
+# Según el autor es la DR MÁS valiosa: con tiempos estrictos SAC cae en un
+# "atractor de corrección activa" (el motor serrucha ±0.5 rad aun balanceado);
+# con jitter encuentra el atractor "calmo de acción mínima", que es el que
+# funciona en el robot real.
+DR_CONTROL_DT_JITTER_FRAC = 0.05
+
+# Ruido de la observación (solo con DR). Imita el jitter de las diferencias
+# finitas y el ruido del encoder medidos en el robot. La velocidad pesa más:
+# el firmware la calcula como (nuevo − viejo)/Δt sobre ~8 ms de muestras de
+# 12 bits, y ±1 LSB ya produce picos de ~0.2–0.5 rad/s con el péndulo quieto.
+DR_OBS_NOISE_STD_POS_RAD = 0.005     # σ en la posición del motor y del péndulo
+DR_OBS_NOISE_STD_VEL_RAD_S = 0.15    # σ en las velocidades
 
 
 @dataclass(frozen=True)
@@ -352,8 +370,9 @@ class RotaryInvertedPendulumEnv(gym.Env):
     Bloques 1-7: construcción, reset(), observación apilada, step(),
     recompensa y suavizado de acción. Con `domain_randomization=True` cada
     episodio sortea parámetros físicos (masa, COM, fricción, stiction del
-    motor, inclinación de la base). Aún falta el render, el ruido/jitter/
-    retardo y el modelo del firmware.
+    motor, inclinación de la base), el jitter del paso de control y el ruido
+    de observación. Aún falta el render, el retardo de acción y el modelo
+    del firmware.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": CONTROL_FREQ_HZ}
@@ -398,7 +417,6 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # Pasos de física (1 ms) por cada paso de control (20 ms a 50 Hz).
         physics_dt = self.model.opt.timestep
         self._n_substeps = max(1, int(round(1.0 / control_freq_hz / physics_dt)))
-        self._dt_control = self._n_substeps * physics_dt
 
         # Pasos de control por episodio (8 s × 50 Hz = 400).
         self._max_steps = int(episode_length_s * control_freq_hz)
@@ -555,11 +573,26 @@ class RotaryInvertedPendulumEnv(gym.Env):
         θ = 0 es péndulo arriba; el ángulo de la articulación `phi` es 0
         colgando, por eso θ = phi − π. Se usan (sin, cos) en vez de θ para que
         la posición sea continua al cruzar ±π.
+
+        Con `domain_randomization` el frame sale cuantizado y con ruido, y por
+        eso consume números aleatorios: sin DR es una función pura del estado.
         """
         motor_pos = float(self.data.qpos[self._motor_qpos_addr])
         phi = float(self.data.qpos[self._pen_qpos_addr])
         motor_vel = float(self.data.qvel[self._motor_qvel_addr])
         pen_vel = float(self.data.qvel[self._pen_qvel_addr])
+
+        if self.domain_randomization:
+            # Lo que el robot real mide: el ángulo del péndulo llega cuantizado
+            # al LSB del AS5600, y todas las lecturas traen algo de ruido. Solo
+            # la OBSERVACIÓN se ensucia; la física y la recompensa usan el
+            # estado verdadero.
+            phi = round(phi / PENDULUM_LSB_RAD) * PENDULUM_LSB_RAD
+            rng = self.np_random
+            motor_pos += rng.normal(0.0, DR_OBS_NOISE_STD_POS_RAD)
+            phi += rng.normal(0.0, DR_OBS_NOISE_STD_POS_RAD)
+            motor_vel += rng.normal(0.0, DR_OBS_NOISE_STD_VEL_RAD_S)
+            pen_vel += rng.normal(0.0, DR_OBS_NOISE_STD_VEL_RAD_S)
 
         theta = _wrap_pi(phi - math.pi)
         return np.array(
@@ -590,7 +623,17 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # promedio de las últimas N acciones.
         self._action_buf.append(a)
         smoothed = sum(self._action_buf) / self.action_smooth_window
-        dt = self._dt_control
+
+        # Duración de ESTE paso de control. Con DR, jitter de ±5 % en el número
+        # de substeps (el reloj real nunca es perfecto); sin DR, siempre fijo.
+        if self.domain_randomization:
+            jitter = self.np_random.uniform(
+                -DR_CONTROL_DT_JITTER_FRAC, DR_CONTROL_DT_JITTER_FRAC
+            )
+            n_sub = max(1, int(round(self._n_substeps * (1.0 + jitter))))
+        else:
+            n_sub = self._n_substeps
+        dt = n_sub * self.model.opt.timestep
 
         # --- Ley P: velocidad deseada → aceleración ordenada ---
         # Realimenta la velocidad ORDENADA, no la medida (ver explicación):
@@ -619,7 +662,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # Un escalón por paso de control golpearía al servo rígido (kp=1000)
         # con un impulso cada 20 ms; el stepper real avanza de forma continua.
         cmd_start, cmd_end = self._prev_cmd_pos, self._motor_target
-        n = self._n_substeps
+        n = n_sub
         for k in range(n):
             self.data.ctrl[0] = cmd_start + (cmd_end - cmd_start) * (k + 1) / n
             mujoco.mj_step(self.model, self.data)
