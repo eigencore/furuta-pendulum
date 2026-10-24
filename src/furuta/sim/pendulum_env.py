@@ -81,6 +81,9 @@ ARM_COM_M = 0.035        # m, centro de masa medido desde el eje del motor
 
 GRAVITY = 9.81           # m/s²
 
+# Resolución del encoder AS5600 (12 bits): un LSB = 2π/4096 rad ≈ 0.088°.
+PENDULUM_LSB_RAD = 2.0 * math.pi / 4096.0
+
 # --- Control ---------------------------------------------------------------
 
 # Frecuencia de control canónica del robot y valor por defecto del entorno.
@@ -101,6 +104,75 @@ MAX_VELOCITY_RAD_S = 3.5
 # ese equivalente corresponde a 1/8 de micropaso; con 1/32 (el valor actual del
 # firmware) 100 kpasos/s² serían ≈ 98 rad/s². Verificar contra el firmware.
 MAX_ACCEL_RAD_S2 = 150.0
+
+# --- Aleatorización de dominio (DR) ------------------------------------------
+# Se activa con `domain_randomization=True`. Cada episodio se sortea un robot
+# distinto alrededor de los valores nominales (sysid + URDF), para que la
+# política no se sobreajuste a un solo conjunto de números. Los rangos cubren
+# lo medido con algo de margen; no deben incluir regímenes imposibles.
+
+DR_PENDULUM_MASS_FRAC = 0.10      # masa del péndulo: nominal × (1 ± 0.10)
+DR_PENDULUM_COM_FRAC = 0.10       # distancia al COM: nominal × (1 ± 0.10)
+
+# Multiplicador de la fricción del péndulo. Es UNO solo y se aplica a la
+# viscosa y a la de Coulomb: ambas salen del mismo rodamiento (grasa,
+# temperatura, asiento de las bolas) y varían juntas.
+DR_PENDULUM_FRICTION_MULT_RANGE = (0.5, 2.0)
+
+# Fricción seca del joint del motor (N·m). El stepper real tiene un par de
+# detención que el actuador de posición no captura. El 0 está dentro del rango
+# para que aparezcan episodios sin stiction.
+DR_MOTOR_FRICTIONLOSS_RANGE_N_M = (0.0, 0.005)
+
+# Inclinación de la base: la mesa no está perfectamente nivelada. Se modela
+# girando el vector de gravedad (ángulo en [0, máx], dirección en [0, 2π)).
+# 0.017 rad ≈ 1°. Mueve la vertical VERDADERA según la posición del brazo.
+DR_BASE_TILT_MAX_RAD = 0.017
+
+# Jitter del paso de control: cada tick, el número de substeps de física se
+# multiplica por (1 ± 0.05) (a 50 Hz: 19, 20 o 21 substeps en vez de 20 fijos).
+# Según el autor es la DR MÁS valiosa: con tiempos estrictos SAC cae en un
+# "atractor de corrección activa" (el motor serrucha ±0.5 rad aun balanceado);
+# con jitter encuentra el atractor "calmo de acción mínima", que es el que
+# funciona en el robot real.
+DR_CONTROL_DT_JITTER_FRAC = 0.05
+
+# Ruido de la observación (solo con DR). Imita el jitter de las diferencias
+# finitas y el ruido del encoder medidos en el robot. La velocidad pesa más:
+# el firmware la calcula como (nuevo − viejo)/Δt sobre ~8 ms de muestras de
+# 12 bits, y ±1 LSB ya produce picos de ~0.2–0.5 rad/s con el péndulo quieto.
+DR_OBS_NOISE_STD_POS_RAD = 0.005     # σ en la posición del motor y del péndulo
+DR_OBS_NOISE_STD_VEL_RAD_S = 0.15    # σ en las velocidades
+
+# Sesgo del cero del péndulo, sorteado por episodio. Al arrancar, el firmware
+# toma como cero el ángulo en que quedó el péndulo, que por la fricción seca
+# solo está a ±F_c/(m·g·d) ≈ ±2° de la vertical colgando. Sin esta DR la
+# política aprende a llevar el θ OBSERVADO a 0; en el robot eso es llevar el θ
+# real a −sesgo, la gravedad deja un par restaurador constante y nunca logra
+# quedarse quieta. Solo afecta a la OBSERVACIÓN (la física y la recompensa no).
+# 0.05 rad ≈ 2.9° cubre la banda medida con margen. A diferencia del resto de
+# la DR, está activo por defecto aunque `domain_randomization` sea False; la
+# evaluación lo apaga con `dr_theta_bias_max_rad=0.0`.
+DR_THETA_BIAS_MAX_RAD = 0.05
+
+# Envolvente de aceleración del motor, sorteada por episodio: el techo REAL
+# del stepper depende de la carga y de su margen de par. Rodea al tope de la
+# ley P (MAX_ACCEL_RAD_S2 = 150) para entrenar con episodios por encima y por
+# debajo; si solo hubiera valores menores, la política nunca tendría la
+# autoridad completa.
+DR_MOTOR_ACCEL_RANGE_RAD_S2 = (110.0, 190.0)
+
+# Transporte del comando: lo que pasa entre que el host calcula la aceleración
+# y el motor la ejecuta (laptop → USB → Arduino → ISR del stepper). Se modela
+# en el comando de ACELERACIÓN, que es lo que de verdad viaja por el cable
+# (la ley P corre en el host, sin retardo). Dos piezas que se componen:
+#  - cola de ticks enteros: apagada por defecto (0, 0). El currículo la
+#    enciende en las etapas 2 y 3 (con el retardo total medido, ≈ 1 tick).
+#  - filtro de primer orden con constante τ: retardo fraccionario. Con
+#    τ = periodo de control sale "mitad comando actual, mitad el anterior",
+#    que es lo medido en el robot.
+DR_ACTION_DELAY_STEPS_RANGE = (0, 0)
+DR_ACTION_LAG_TAU_RANGE_S = (0.0, 0.030)
 
 
 @dataclass(frozen=True)
@@ -326,8 +398,11 @@ class RotaryInvertedPendulumEnv(gym.Env):
     así que θ = phi − π (se convierte al construir la observación).
 
     Bloques 1-7: construcción, reset(), observación apilada, step(),
-    recompensa y suavizado de acción. Aún falta el render, la
-    aleatorización de dominio y el modelo del firmware.
+    recompensa y suavizado de acción. Con `domain_randomization=True` cada
+    episodio sortea parámetros físicos (masa, COM, fricción, stiction del
+    motor, inclinación de la base), la envolvente de aceleración del motor, el
+    lag/retardo del comando, el jitter del paso de control y el ruido de
+    observación. Aún falta el render y el modelo del firmware.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": CONTROL_FREQ_HZ}
@@ -344,6 +419,11 @@ class RotaryInvertedPendulumEnv(gym.Env):
         action_smooth_window: int = ACTION_SMOOTH_WINDOW,
         reward_weights: RewardWeights | None = None,
         hard_stop_penalty: float = HARD_STOP_PENALTY,
+        domain_randomization: bool = False,
+        dr_theta_bias_max_rad: float = DR_THETA_BIAS_MAX_RAD,
+        dr_motor_accel_range_rad_s2: tuple[float, float] = DR_MOTOR_ACCEL_RANGE_RAD_S2,
+        dr_action_delay_steps_range: tuple[int, int] = DR_ACTION_DELAY_STEPS_RANGE,
+        dr_action_lag_tau_range_s: tuple[float, float] = DR_ACTION_LAG_TAU_RANGE_S,
     ) -> None:
         super().__init__()
         self.params = PendulumParams.load(params_path)
@@ -361,6 +441,35 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self.action_smooth_window = action_smooth_window
         self.reward_weights = reward_weights or RewardWeights()
         self.hard_stop_penalty = hard_stop_penalty
+        # False = parámetros nominales (evaluación y depuración); True = un
+        # robot distinto por episodio (entrenamiento).
+        self.domain_randomization = domain_randomization
+        # El sesgo θ es independiente de la DR (ver DR_THETA_BIAS_MAX_RAD).
+        if dr_theta_bias_max_rad < 0:
+            raise ValueError(
+                f"dr_theta_bias_max_rad debe ser >= 0, recibí {dr_theta_bias_max_rad}"
+            )
+        self._dr_theta_bias_max_rad = float(dr_theta_bias_max_rad)
+        self._theta_bias_rad = 0.0     # se sortea en cada reset()
+
+        # Rangos de la DR del actuador (se pueden cambiar por etapa del
+        # currículo) y los valores del episodio en curso. Sin DR quedan en el
+        # valor neutro: envolvente = tope de la ley P, sin lag ni retardo.
+        for nombre, (lo, hi), minimo in [
+            ("dr_motor_accel_range_rad_s2", dr_motor_accel_range_rad_s2, 0.0),
+            ("dr_action_delay_steps_range", dr_action_delay_steps_range, 0),
+            ("dr_action_lag_tau_range_s", dr_action_lag_tau_range_s, 0.0),
+        ]:
+            if not (minimo <= lo <= hi):
+                raise ValueError(f"{nombre} debe cumplir {minimo} <= min <= max, recibí ({lo}, {hi})")
+        self._dr_motor_accel_range_rad_s2 = dr_motor_accel_range_rad_s2
+        self._dr_action_delay_steps_range = dr_action_delay_steps_range
+        self._dr_action_lag_tau_range_s = dr_action_lag_tau_range_s
+        self._motor_max_accel_rad_s2 = max_accel_rad_s2
+        self._action_delay_steps = 0
+        self._action_lag_tau_s = 0.0
+        self._lagged_accel_cmd = 0.0
+        self._accel_cmd_queue: deque[float] = deque()
 
         self.model = mujoco.MjModel.from_xml_string(build_mjcf(self.params))
         self.data = mujoco.MjData(self.model)
@@ -368,7 +477,6 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # Pasos de física (1 ms) por cada paso de control (20 ms a 50 Hz).
         physics_dt = self.model.opt.timestep
         self._n_substeps = max(1, int(round(1.0 / control_freq_hz / physics_dt)))
-        self._dt_control = self._n_substeps * physics_dt
 
         # Pasos de control por episodio (8 s × 50 Hz = 400).
         self._max_steps = int(episode_length_s * control_freq_hz)
@@ -382,6 +490,8 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self._motor_qvel_addr = int(motor.dofadr[0])
         self._pen_qpos_addr = int(pendulum.qposadr[0])
         self._pen_qvel_addr = int(pendulum.dofadr[0])
+        # Id del cuerpo del péndulo: la DR modifica su masa, inercia y COM.
+        self._pen_body_id = int(self.model.body("pendulum").id)
 
         # Acción: un número en [-1, 1] que luego se escala a ±max_velocity.
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
@@ -423,6 +533,20 @@ class RotaryInvertedPendulumEnv(gym.Env):
         super().reset(seed=seed)       # inicializa self.np_random con la semilla
         mujoco.mj_resetData(self.model, self.data)
 
+        # `mj_resetData` solo limpia `data`; los parámetros físicos viven en
+        # `model`, así que la DR los reescribe aquí, una vez por episodio.
+        if self.domain_randomization:
+            self._sample_dr_params()
+
+        # Sesgo del cero del encoder: fuera del `if` de arriba a propósito (ver
+        # DR_THETA_BIAS_MAX_RAD). Con 0.0 no se gasta ningún número aleatorio.
+        if self._dr_theta_bias_max_rad > 0.0:
+            self._theta_bias_rad = float(self.np_random.uniform(
+                -self._dr_theta_bias_max_rad, self._dr_theta_bias_max_rad
+            ))
+        else:
+            self._theta_bias_rad = 0.0
+
         # Motor: posición aleatoria dentro del 70 % del límite seguro (≈ ±87°),
         # para que la política aprenda a volver desde cualquier punto del
         # rango y no solo desde el centro.
@@ -446,10 +570,72 @@ class RotaryInvertedPendulumEnv(gym.Env):
         self._action_buf.extend([0.0] * self.action_smooth_window)  # maxlen descarta lo viejo
         self._obs_history.clear()      # _obs() lo rellena con el frame inicial
 
+        # Transporte vacío al empezar: el filtro en 0 y la cola llena de ceros
+        # (los primeros `retardo` ticks no llega ninguna aceleración al motor).
+        # Va DESPUÉS de sortear los parámetros, porque el retardo se sortea ahí.
+        self._lagged_accel_cmd = 0.0
+        self._accel_cmd_queue = deque(
+            [0.0] * self._action_delay_steps, maxlen=self._action_delay_steps + 1
+        )
+
         # Recalcula las cantidades derivadas con el nuevo estado (sin avanzar
         # el tiempo).
         mujoco.mj_forward(self.model, self.data)
         return self._obs(), {}
+
+    def _sample_dr_params(self) -> None:
+        """Sortea los parámetros físicos de este episodio y los escribe en `model`.
+
+        Usa `self.np_random`, así que `reset(seed=...)` lo hace reproducible.
+        """
+        rng = self.np_random
+        nominal = self.params
+        pen = self._pen_body_id
+
+        # Masa y distancia al COM. La inercia propia respecto al COM es una
+        # propiedad geométrica de la pieza (viene del CAD) y NO se sortea:
+        # MuJoCo aplica Steiner solo, así que la inercia respecto al pivote
+        # resulta m·d² + I_com con los valores sorteados.
+        m = rng.uniform(
+            nominal.pendulum_mass_kg * (1.0 - DR_PENDULUM_MASS_FRAC),
+            nominal.pendulum_mass_kg * (1.0 + DR_PENDULUM_MASS_FRAC),
+        )
+        d = rng.uniform(
+            nominal.pendulum_com_m * (1.0 - DR_PENDULUM_COM_FRAC),
+            nominal.pendulum_com_m * (1.0 + DR_PENDULUM_COM_FRAC),
+        )
+        self.model.body_mass[pen] = m
+        self.model.body_inertia[pen] = (
+            PENDULUM_I_COM_SWING_KG_M2, PENDULUM_I_COM_SWING_KG_M2, 1e-7
+        )
+        self.model.body_ipos[pen, 2] = -d       # COM a -d en z (colgando)
+
+        # Fricción del péndulo: mismo multiplicador para viscosa y Coulomb.
+        fric_mult = rng.uniform(*DR_PENDULUM_FRICTION_MULT_RANGE)
+        self.model.dof_damping[self._pen_qvel_addr] = nominal.pendulum_friction * fric_mult
+        self.model.dof_frictionloss[self._pen_qvel_addr] = nominal.pendulum_coulomb * fric_mult
+
+        # Stiction del motor.
+        self.model.dof_frictionloss[self._motor_qvel_addr] = rng.uniform(
+            *DR_MOTOR_FRICTIONLOSS_RANGE_N_M
+        )
+
+        # Inclinación de la base: se gira la gravedad un ángulo pequeño alrededor
+        # de un eje horizontal al azar. Su módulo se conserva (g sigue valiendo 9.81).
+        tilt = rng.uniform(0.0, DR_BASE_TILT_MAX_RAD)
+        azim = rng.uniform(0.0, 2.0 * math.pi)
+        self.model.opt.gravity[:] = (
+            GRAVITY * math.sin(tilt) * math.cos(azim),
+            GRAVITY * math.sin(tilt) * math.sin(azim),
+            -GRAVITY * math.cos(tilt),
+        )
+
+        # Actuador: envolvente de aceleración y transporte del comando. Estos
+        # sorteos van al final para no alterar la secuencia de los anteriores.
+        self._motor_max_accel_rad_s2 = float(rng.uniform(*self._dr_motor_accel_range_rad_s2))
+        lo, hi = self._dr_action_delay_steps_range
+        self._action_delay_steps = int(rng.integers(lo, hi + 1))
+        self._action_lag_tau_s = float(rng.uniform(*self._dr_action_lag_tau_range_s))
 
     def _obs(self) -> np.ndarray:
         """Observación apilada: los últimos `obs_history_len` frames, del más viejo al nuevo.
@@ -471,11 +657,29 @@ class RotaryInvertedPendulumEnv(gym.Env):
         θ = 0 es péndulo arriba; el ángulo de la articulación `phi` es 0
         colgando, por eso θ = phi − π. Se usan (sin, cos) en vez de θ para que
         la posición sea continua al cruzar ±π.
+
+        Con `domain_randomization` el frame sale cuantizado y con ruido, y por
+        eso consume números aleatorios: sin DR es una función pura del estado.
         """
         motor_pos = float(self.data.qpos[self._motor_qpos_addr])
         phi = float(self.data.qpos[self._pen_qpos_addr])
         motor_vel = float(self.data.qvel[self._motor_qvel_addr])
         pen_vel = float(self.data.qvel[self._pen_qvel_addr])
+
+        if self.domain_randomization:
+            # Lo que el robot real mide: el ángulo del péndulo llega cuantizado
+            # al LSB del AS5600, y todas las lecturas traen algo de ruido. Solo
+            # la OBSERVACIÓN se ensucia; la física y la recompensa usan el
+            # estado verdadero.
+            phi = round(phi / PENDULUM_LSB_RAD) * PENDULUM_LSB_RAD
+            rng = self.np_random
+            motor_pos += rng.normal(0.0, DR_OBS_NOISE_STD_POS_RAD)
+            phi += rng.normal(0.0, DR_OBS_NOISE_STD_POS_RAD)
+            motor_vel += rng.normal(0.0, DR_OBS_NOISE_STD_VEL_RAD_S)
+            pen_vel += rng.normal(0.0, DR_OBS_NOISE_STD_VEL_RAD_S)
+
+        # Sesgo del cero del encoder: solo la observación, nunca la física.
+        phi += self._theta_bias_rad
 
         theta = _wrap_pi(phi - math.pi)
         return np.array(
@@ -492,6 +696,8 @@ class RotaryInvertedPendulumEnv(gym.Env):
         Cadena (modo velocidad):
             acción ∈ [-1, 1] → promedio de las últimas N → v_des = promedio·3.5 rad/s
             → ley P saturada: accel = (v_des − v_ordenada)·f_control, tope ±150 rad/s²
+            → transporte (con DR): filtro de 1.er orden y cola de ticks, sobre accel
+            → techo de aceleración del motor en este episodio (110–190 con DR)
             → v_ordenada += accel·dt (tope ±3.5 rad/s)
             → objetivo += v_ordenada·dt (tope ±125°)
             → 20 substeps de física con ctrl[0] interpolado hacia el objetivo.
@@ -506,7 +712,17 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # promedio de las últimas N acciones.
         self._action_buf.append(a)
         smoothed = sum(self._action_buf) / self.action_smooth_window
-        dt = self._dt_control
+
+        # Duración de ESTE paso de control. Con DR, jitter de ±5 % en el número
+        # de substeps (el reloj real nunca es perfecto); sin DR, siempre fijo.
+        if self.domain_randomization:
+            jitter = self.np_random.uniform(
+                -DR_CONTROL_DT_JITTER_FRAC, DR_CONTROL_DT_JITTER_FRAC
+            )
+            n_sub = max(1, int(round(self._n_substeps * (1.0 + jitter))))
+        else:
+            n_sub = self._n_substeps
+        dt = n_sub * self.model.opt.timestep
 
         # --- Ley P: velocidad deseada → aceleración ordenada ---
         # Realimenta la velocidad ORDENADA, no la medida (ver explicación):
@@ -514,6 +730,27 @@ class RotaryInvertedPendulumEnv(gym.Env):
         v_des = smoothed * self.max_velocity_rad_s
         accel_cmd = (v_des - self._motor_vel) * self.control_freq_hz
         accel_cmd = float(np.clip(accel_cmd, -self.max_accel_rad_s2, self.max_accel_rad_s2))
+
+        # --- Transporte host → motor, sobre el comando de ACELERACIÓN ---
+        # La ley P corre en el host sin retardo; lo que viaja (y se retrasa) es
+        # la aceleración ya calculada. Primero el filtro de 1.er orden (retardo
+        # fraccionario) y luego la cola de ticks enteros; se componen.
+        # alpha = dt/(τ+dt): τ=0 → alpha=1 (sin lag); τ=dt → mitad actual y
+        # mitad anterior. Se usa el periodo NOMINAL de control, sin jitter.
+        if self._action_lag_tau_s > 0.0:
+            dt_ctrl = 1.0 / self.control_freq_hz
+            alpha = dt_ctrl / (self._action_lag_tau_s + dt_ctrl)
+            self._lagged_accel_cmd = (
+                (1.0 - alpha) * self._lagged_accel_cmd + alpha * accel_cmd
+            )
+            accel_cmd = self._lagged_accel_cmd
+        if self._action_delay_steps > 0:
+            self._accel_cmd_queue.append(accel_cmd)
+            accel_cmd = float(self._accel_cmd_queue.popleft())
+        # Techo del stepper en ESTE episodio (sin DR coincide con el de la ley P).
+        accel_cmd = float(np.clip(
+            accel_cmd, -self._motor_max_accel_rad_s2, self._motor_max_accel_rad_s2
+        ))
 
         # --- Aceleración → velocidad → posición objetivo ---
         self._motor_vel = float(np.clip(
@@ -535,7 +772,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
         # Un escalón por paso de control golpearía al servo rígido (kp=1000)
         # con un impulso cada 20 ms; el stepper real avanza de forma continua.
         cmd_start, cmd_end = self._prev_cmd_pos, self._motor_target
-        n = self._n_substeps
+        n = n_sub
         for k in range(n):
             self.data.ctrl[0] = cmd_start + (cmd_end - cmd_start) * (k + 1) / n
             mujoco.mj_step(self.model, self.data)
@@ -566,6 +803,7 @@ class RotaryInvertedPendulumEnv(gym.Env):
             "phi": phi,
             "motor_target": self._motor_target,
             "motor_vel_cmd": self._motor_vel,
+            "accel_cmd": accel_cmd,          # aceleración que llegó al motor
             "smoothed_action": smoothed,
         }
         return self._obs(), reward, terminated, truncated, info
